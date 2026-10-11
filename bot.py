@@ -5,7 +5,7 @@ list.am -> Telegram («Барахолка Երևան»).
 Новые объявления берутся из карточек разделов: заголовок, цена, место, фото, время.
 Публикация не зависит от страницы объявления: если она не читается (403 / защита),
 пост всё равно уходит с данными и фото из карточки. Страница объявления —
-только дополнение: больше фото и описание.
+дополнение: все фото галереи и описание.
 """
 import os
 import re
@@ -20,13 +20,19 @@ TOKEN    = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 STATE      = "state.json"
-INTERVAL = 10 * 60
+INTERVAL   = 10 * 60      # пауза между публикациями, сек
 QUEUE_MAX  = 250          # максимум объявлений в очереди
 FRESH_H    = 24           # сколько часов объявление считается свежим
 TEST       = False        # True -> ничего не отправлять, только лог
 
 BASE = "https://www.list.am"
 TZ   = timezone(timedelta(hours=4))          # время сайта (Ереван)
+
+HDRS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
+    "Accept-Language": "ru,hy;q=0.9,en;q=0.8",
+}
 
 SECTIONS = {
     "4":   "Электроника",
@@ -45,9 +51,19 @@ TITLE_RE = re.compile(r"!\[([^\]\n]{2,140})\]\(|alt=\"([^\"]{2,140})\"")
 BLOCKED  = ("just a moment", "attention required", "enable javascript",
             "checking your browser", "cloudflare", "performing security verification")
 
+DESC_END = (r"(?:Номер объявления|Пожаловаться|Отзыв|Написать|Позвонить|Похожие|"
+            r"Комментарии|Информация о (?:товаре|продавце)|Download App|На главную|"
+            r"Report|Смотреть все)")
+
+JUNK_LINE = ("Войти", "Разместить объявление", "Помощь", "Обратная связь",
+             "Создать свой магазин", "Верификация", "List Реклама", "Ваша корзина")
+
 def is_blocked(text):
     t = (text or "").strip()
     return len(t) < 800 or any(m in t.lower() for m in BLOCKED)
+
+def plain(h):
+    return " ".join(htmllib.unescape(re.sub(r"<[^>]+>", " ", h)).split())
 
 # ---------- разбор карточек раздела ----------
 
@@ -62,8 +78,10 @@ def nearest(pat, text, pos, span=600):
 
 def clean_title(s):
     s = htmllib.unescape(s or "")
+    s = re.sub(r"^\s*Image\s*\d+\s*[:.\-]\s*", "", s, flags=re.I)   # метка Jina
     s = re.sub(r"[\\]{1,2}", "", s)
-    return " ".join(s.split())[:140]
+    s = " ".join(s.split())
+    return s[:140]
 
 def card_place(text, pos, span=220):
     """Место — последний кусок перед датой, после «›» категории."""
@@ -90,10 +108,7 @@ def parse_cards(text):
 
         photo = ""
         if pm:
-            photo = pm.group(0)
-            if photo.startswith("//"):
-                photo = "https:" + photo
-            photo = re.sub(r"(img\.list\.am)/[a-z]+/", r"\1/f/", photo, count=1)
+            photo = full_photo(pm.group(0))
 
         title = clean_title((tm.group(1) or tm.group(2)) if tm else "")
         price = " ".join(pr.group(0).split()) if pr else ""
@@ -111,6 +126,13 @@ def parse_cards(text):
                     "price": price, "place": place, "photo": photo, "ts": ts}
     return out
 
+def full_photo(u):
+    """img.list.am/r/692/96450692.webp -> img.list.am/f/692/96450692.webp"""
+    u = htmllib.unescape(u or "")
+    if u.startswith("//"):
+        u = "https:" + u
+    return re.sub(r"(img\.list\.am)/[a-z]+/", r"\1/f/", u, count=1)
+
 def is_fresh(ts):
     if not ts:
         return False
@@ -119,31 +141,58 @@ def is_fresh(ts):
 
 # ---------- страница объявления (дополнение, не обязательно) ----------
 
+def direct(sess, url):
+    try:
+        r = sess.get(url, headers=HDRS, timeout=40)
+        if r.status_code == 200 and len(r.text) > 2000 and not is_blocked(r.text):
+            return r.text
+        print(f"  прямой вход {r.status_code}, {len(r.text)} знаков")
+    except Exception as e:
+        print("  прямой вход ошибка:", type(e).__name__)
+    return ""
+
+def extract_desc(text):
+    if not text:
+        return ""
+    m = re.search(r"Описание\s*[:：]?\s*(.{30,4000}?)\s*(?:" + DESC_END + r"|\Z)",
+                  text, re.S)
+    if not m:
+        return ""
+    s = " ".join(m.group(1).split())
+    for junk in ("Пожаловаться", "Написать", "Позвонить", "Download App",
+                 "На главную", "Смотреть все"):
+        i = s.find(junk)
+        if i > 20:
+            s = s[:i]
+    s = s.strip(" -–—")
+    if s.lower() in ("нет", "нет описания") or len(s) < 15:
+        return ""
+    return s[:700]
+
 def item_extra(sess, iid):
-    """Фото и описание со страницы объявления. Неудача публикации не мешает."""
-    md = jina(sess, f"{BASE}/ru/item/{iid}")
-    if not md:
-        print(f"  {iid}: страница объявления не читается, беру карточку")
-        return {"photos": [], "desc": ""}
-    cut = md.find("Похожие")
+    """Все фото галереи и описание. Неудача публикации не мешает."""
+    url = f"{BASE}/ru/item/{iid}"
+
+    html = direct(sess, url)                 # html -> вся галерея
+    md = jina(sess, url)                     # markdown -> описание
+
+    photos, desc = {}, ""
+    for src in (html.replace("\\/", "/") if html else "", md or ""):
+        for m in PHOTO_RE.finditer(src):
+            u = full_photo(m.group(0))
+            photos[u.rsplit("/", 1)[-1]] = u
+    if html:
+        desc = extract_desc(plain(html))
+    if not desc:
+        desc = extract_desc(md)
+
+    cut = (md or "").find("Похожие")
     if cut > 0:
         md = md[:cut]
+    if not desc:
+        desc = extract_desc(md)
 
-    photos = {}
-    for m in PHOTO_RE.finditer(md):
-        u = m.group(0)
-        if u.startswith("//"):
-            u = "https:" + u
-        u = re.sub(r"(img\.list\.am)/[a-z]+/", r"\1/f/", u, count=1)
-        pid = u.rsplit("/", 1)[-1]
-        photos[pid] = u
-
-    desc = ""
-    m = re.search(r"Описание\s*\n+(.+?)\n\s*Номер объявления", md, re.S)
-    if m:
-        desc = " ".join(m.group(1).split())
-
-    print(f"  {iid}: со страницы фото {len(photos)}, описание {len(desc)} знаков")
+    print(f"  {iid}: фото {len(photos)}, описание {len(desc)} знаков")
     return {"photos": list(photos.values())[:10], "desc": desc}
 
 # ---------- текст ----------
@@ -298,8 +347,7 @@ def main():
 
     if TEST:
         for e in st["queue"][:3]:
-            extra = {"photos": [], "desc": ""}
-            print("---", e["url"], "|", make_caption(sess, e, extra))
+            print("---", e["url"], "|", make_caption(sess, e, {"desc": ""}))
         return
 
     # 3. публикация одной карточки
