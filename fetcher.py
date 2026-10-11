@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-# fetcher.py — ընդհանուր ընթերցիչ (list.am, gortsarq.am և այլն)
-# Հերթականությունը՝ 1) ուղիղ requests (բրաուզերի headers) 2) r.jina.ai x-engine: browser
-# 3) անվճար պրոքսի։ jina() վերադարձնում է նույն markdown-ը, ինչ r.jina.ai-ն, որպեսզի
+# fetcher.py — ընդհանուր ընթերցիչ (list.am, gortsarq.am և այլն) + ընդհանուր թարգմանիչ
+# Ընթերցում՝ 1) ուղիղ requests 2) r.jina.ai (browser, ապա առանց browser-ի) 3) պրոքսի։
+# jina() վերադարձնում է նույն markdown-ը, ինչ r.jina.ai-ն, որպեսզի
 # bot.py / gortsarq.py / arenda.py-ի պարսերները մնան անփոփոխ։
 # x-respond-with: html դեպքում վերադարձվում է չմշակված HTML։
 
@@ -153,26 +153,29 @@ def _direct(sess, url):
     return ""
 
 def _via_jina(sess, url, extra):
-    h = {"User-Agent": "curl/8.5.0", "x-engine": "browser"}
-    if JINA_KEY:
-        h["Authorization"] = "Bearer " + JINA_KEY
-    if extra:
-        h.update(extra)
-    try:
-        r = sess.get(JINA + url, headers=h, timeout=35)
-        print("  jina browser՝ %s, %s նշան" % (r.status_code, len(r.text or "")))
-        if r.status_code == 200 and not is_blocked(r.text):
-            return r.text, True
-    except Exception as e:
-        print("  jina սխալ՝", type(e).__name__)
-    time.sleep(1)
+    # 1) browser engine (անցնում է JS-ստուգումը) 2) առանց engine-ի, եթե 401/քվոտա է եղել
+    for i, eng in enumerate(({"x-engine": "browser", "x-no-cache": "true"}, {}), 1):
+        h = {"User-Agent": "curl/8.5.0"}
+        if JINA_KEY:
+            h["Authorization"] = "Bearer " + JINA_KEY
+        h.update(eng)
+        if extra:
+            h.update(extra)
+        try:
+            r = sess.get(JINA + url, headers=h, timeout=35)
+            print("  jina %s՝ %s, %s նշան" % (i, r.status_code, len(r.text or "")))
+            if r.status_code == 200 and not is_blocked(r.text):
+                return r.text, True
+        except Exception as e:
+            print("  jina սխալ՝", type(e).__name__)
+        time.sleep(1)
     return "", False
 
 def _via_proxy(sess, url):
     q = quote(url, safe="")
     for p in PROXIES:
         try:
-            r = sess.get(p + q, headers={"User-Agent": UA}, timeout=30)
+            r = sess.get(p + q, headers={"User-Agent": UA}, timeout=20)
             print("  պրոքսի՝ %s, %s նշան" % (r.status_code, len(r.text or "")))
             if r.status_code == 200 and not is_blocked(r.text):
                 return r.text
@@ -196,3 +199,60 @@ def jina(sess, url, extra=None):
     if html_mode or from_jina:
         return raw
     return to_md(raw, url)
+
+# ---------- թարգմանություն՝ երեք աստիճանով ----------
+
+def _gjson(sess, url, params):
+    try:
+        r = sess.get(url, params=params, headers={"User-Agent": UA}, timeout=25)
+        if r.status_code != 200:
+            print("  թարգմանություն՝ %s" % r.status_code)
+            return None
+        return r.json()
+    except Exception as e:
+        print("  թարգմանություն՝", type(e).__name__)
+        return None
+
+def translate(sess, text):
+    text = (text or "").strip()
+    if not text:
+        return text
+    q = text[:2000]
+
+    # 1) translate.googleapis.com
+    data = _gjson(sess, "https://translate.googleapis.com/translate_a/single",
+                  {"client": "gtx", "sl": "auto", "tl": "ru", "dt": "t", "q": q})
+    if isinstance(data, list) and data and isinstance(data[0], list):
+        res = "".join(p[0] for p in data[0]
+                      if p and isinstance(p, list) and p[0]).strip()
+        if res:
+            return res
+
+    # 2) clients5.google.com
+    data = _gjson(sess, "https://clients5.google.com/translate_a/t",
+                  {"client": "dict-chrome-ex", "sl": "auto", "tl": "ru", "q": q})
+    parts = []
+    if isinstance(data, list):
+        for it in data:
+            if isinstance(it, list) and it and isinstance(it[0], str):
+                parts.append(it[0])
+            elif isinstance(it, str):
+                parts.append(it)
+    elif isinstance(data, dict) and isinstance(data.get("sentences"), list):
+        for it in data["sentences"]:
+            if isinstance(it, dict) and it.get("trans"):
+                parts.append(it["trans"])
+    res = " ".join(parts).strip()
+    if res:
+        return res
+
+    # 3) api.mymemory.translated.net (միայն հայերեն տեքստի համար)
+    if re.search(r"[Ա-Ֆա-ֆ]", q):
+        data = _gjson(sess, "https://api.mymemory.translated.net/get",
+                      {"q": q, "langpair": "hy|ru"})
+        if isinstance(data, dict):
+            res = ((data.get("responseData") or {}).get("translatedText") or "").strip()
+            if res and "MYMEMORY WARNING" not in res.upper():
+                return res
+
+    return text
