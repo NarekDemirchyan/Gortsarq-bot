@@ -21,6 +21,7 @@ CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 STATE      = "state.json"
 INTERVAL = 10 * 60
+PUBLISH_MAX = 3           # сколько публикаций за один запуск (1 = как сейчас)
 QUEUE_MAX  = 250          # максимум объявлений в очереди
 FRESH_H    = 24           # сколько часов объявление считается свежим
 TEST       = False        # True -> ничего не отправлять, только лог
