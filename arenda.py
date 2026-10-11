@@ -504,10 +504,6 @@ def make_caption(sess, d):
     if d["phone"]:
         tail = "По всем вопросам обращайтесь:\n📞 " + esc(d["phone"])
     cap = "\n\n".join(lines)
-    room = 1024 - len(cap) - (len(tail) + 2 if tail else 0) - 2
-    if d["desc"] and room > 80:
-        txt = esc(translate(sess, d["desc"]))
-        cap += "\n\n" + txt[:room]
     if tail:
         cap += "\n\n" + tail
     return cap[:1024]
