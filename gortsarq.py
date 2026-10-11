@@ -318,6 +318,6 @@ def main():
 
     save(st)
 
-from fetcher import jina
+from fetcher import jina, translate
 
 main()
