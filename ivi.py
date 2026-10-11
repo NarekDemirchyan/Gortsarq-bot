@@ -2,8 +2,7 @@
 """
 ivi.am -> Telegram.
 Публикует объявления, обновлённые продавцом за последние 24 часа.
-Каждое объявление выходит один раз: id попадает в state.json -> "ivi" -> "published".
-Состояние живёт внутри общего state.json, поэтому менять workflow не нужно.
+Каждое объявление выходит один раз: id попадает в state-ivi.json -> "published".
 Из разделов исключены: услуги, работа, бизнес, прочие объявления,
 аренда недвижимости, автосервис, стройка/ремонт.
 """
@@ -19,13 +18,13 @@ import requests
 TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-STATE       = "state.json"
-KEY         = "ivi"
+STATE       = "state-ivi.json"
 INTERVAL    = 10 * 60    # пауза между публикациями, сек
 PUBLISH_MAX = 1          # сколько публиковать за один запуск
 QUEUE_MAX   = 300        # предел очереди
 FRESH_H     = 24         # сколько часов объявление считается свежим после обновления
 PER_CAT     = 60         # сколько карточек смотреть в разделе
+SAMPLE      = 3          # сколько карточек печатать в лог для проверки
 TEST        = False      # True -> ничего не отправлять, только показать разбор в логе
 
 BASE = "https://ivi.am"
@@ -45,8 +44,8 @@ SECTIONS = {
 
 # подкатегории, которые не берём, даже если они попали в раздел
 SKIP_SUB = {
-    "ansharj-guyq": ("vardzakalotyon",),    # аренда недвижимости
-    "transport":    ("avto-moto-uslugi",),  # автосервис, мойки
+    "ansharj-guyq": ("vardzakalotyon",),       # аренда недвижимости
+    "transport":    ("avto-moto-uslugi",),     # автосервис, мойки
     "dom-i-sad":    ("stroitelstvo-remont",),  # стройка и ремонт
 }
 
@@ -61,7 +60,8 @@ PHOTO_RE = re.compile(
     r'(?:src|data-src)="([^"]*?/files/images/items/\d+/[0-9a-z]+\.(?:jpg|jpeg|png|webp))"',
     re.I)
 PRICE_RE = re.compile(r"(\d[\d\s]{0,12})\s*֏")
-UPD_RE   = re.compile(r"Обновлено\s+([A-Za-zА-Яа-яЁё0-9:.]{1,30})")
+UPD_RE   = re.compile(r"(?:Обновлено|Թարմացվել է)\s*:?\s*([^|]{1,40})")
+REL_RE   = re.compile(r"([^|]{0,20}(?:Сегодня|Вчера|այսօր|երեկ)\s+\d{1,2}:\d{2})")
 MONTHS   = {"янв": 1, "фев": 2, "мар": 3, "апр": 4, "май": 5, "мая": 5, "июн": 6,
             "июл": 7, "авг": 8, "сен": 9, "окт": 10, "ноя": 11, "дек": 12}
 
@@ -137,22 +137,29 @@ def card_scan(h, slug, limit):
     ms = list(LINK_RE.finditer(h))
     out = {}
     skip = SKIP_SUB.get(slug, ())
-    for i, m in enumerate(ms):
-        iid = m.group(2)
-        if iid in out:
+    i = 0
+    while i < len(ms):
+        iid = ms[i].group(2)
+        j = i + 1
+        while j < len(ms) and ms[j].group(2) == iid:
+            j += 1                     # карточка ссылается на объявление дважды
+        start = ms[i].start()
+        end = ms[j].start() if j < len(ms) else min(len(h), ms[j - 1].end() + 3000)
+        win = h[start:end]
+        url = BASE + ms[i].group(0)
+        i = j
+        if iid in out or any(tok in win for tok in skip):
             continue
-        end = ms[i + 1].start() if i + 1 < len(ms) else min(len(h), m.end() + 3000)
-        win = h[m.start():end]
-        if any(tok in win for tok in skip):
-            continue
-        txt = plain(win)[:400]
-        mu = UPD_RE.search(txt)
+        txt = plain(win)[:500]
+        mu = UPD_RE.search(txt) or REL_RE.search(txt)
+        upd = mu.group(1).strip(" |·—") if mu else ""
         ph = PHOTO_RE.search(win)
         out[iid] = {
             "id": iid,
-            "url": BASE + m.group(0),
-            "updated_txt": mu.group(1).strip() if mu else "",
-            "ts": parse_updated(mu.group(1) if mu else ""),
+            "url": url,
+            "text": txt,
+            "updated_txt": upd,
+            "ts": parse_updated(upd),
             "price": find_price(txt),
             "photo": ph.group(1) if ph else "",
         }
@@ -199,7 +206,8 @@ def item_data(sess, url):
             photos = [htmllib.unescape(m.group(1))]
 
     desc = ""
-    m = re.search(r'class="[^"]*(?:desc|text|opisanie)[^"]*"[^>]*>(.*?)</div>', h, re.S | re.I)
+    m = re.search(r'class="[^"]*(?:desc|text|opisanie)[^"]*"[^>]*>(.*?)</div>',
+                  h, re.S | re.I)
     if m:
         desc = plain(m.group(1))
     if not desc:
@@ -318,7 +326,7 @@ def load_st():
         try:
             return json.load(open(STATE, encoding="utf-8"))
         except Exception as e:
-            print("state.json не читается:", e)
+            print("state-ivi.json не читается:", e)
     return {}
 
 def main():
@@ -327,11 +335,10 @@ def main():
         return
 
     st = load_st()
-    s = st.setdefault(KEY, {})
-    s.setdefault("queue", [])       # [[id, url, ts], ...]
-    s.setdefault("published", {})   # id -> ts
-    s.setdefault("failed", {})
-    s.setdefault("last_publish", 0)
+    st.setdefault("queue", [])       # [[id, url, ts], ...]
+    st.setdefault("published", {})   # id -> ts
+    st.setdefault("failed", {})
+    st.setdefault("last_publish", 0)
 
     sess = requests.Session()
     now = time.time()
@@ -342,29 +349,31 @@ def main():
         cards = card_scan(h, slug, PER_CAT)
         fresh = [c for c in cards.values() if is_fresh(c["ts"])]
         print(f"[{slug}] {name}: карточек {len(cards)}, свежих за {FRESH_H}ч {len(fresh)}")
+        for c in list(cards.values())[:SAMPLE]:
+            print(f"    {c['id']}: «{c['text'][:140]}»")
         for c in fresh:
-            if c["id"] in s["published"]:
+            if c["id"] in st["published"]:
                 continue
-            if any(q[0] == c["id"] for q in s["queue"]):
+            if any(q[0] == c["id"] for q in st["queue"]):
                 continue
-            s["queue"].append([c["id"], c["url"], int(c["ts"])])
+            st["queue"].append([c["id"], c["url"], int(c["ts"])])
         time.sleep(1)
 
     # 2. старое выкидываем, хвост очереди ограничиваем
     far = time.time() - FRESH_H * 3600
-    s["queue"] = [q for q in s["queue"] if q[2] >= far]
-    while len(s["queue"]) > QUEUE_MAX:
-        s["queue"].pop(0)
-    print("в очереди:", len(s["queue"]))
+    st["queue"] = [q for q in st["queue"] if q[2] >= far]
+    while len(st["queue"]) > QUEUE_MAX:
+        st["queue"].pop(0)
+    print("в очереди:", len(st["queue"]))
 
     # 3. публикация
     done = 0
-    while s["queue"] and done < PUBLISH_MAX:
-        if not TEST and now - s["last_publish"] < INTERVAL:
+    while st["queue"] and done < PUBLISH_MAX:
+        if not TEST and now - st["last_publish"] < INTERVAL:
             print("ждём интервал между публикациями")
             break
-        iid, url, ts = s["queue"].pop(0)
-        if iid in s["published"]:
+        iid, url, ts = st["queue"].pop(0)
+        if iid in st["published"]:
             continue
         d = None
         try:
@@ -379,23 +388,23 @@ def main():
             continue
         ok = bool(cap) and bool(d["photos"]) and send(sess, d, cap)
         if ok:
-            s["published"][iid] = int(now)
-            s["last_publish"] = now
+            st["published"][iid] = int(now)
+            st["last_publish"] = now
             done += 1
             print("опубликовано:", iid)
         else:
-            s["failed"][iid] = s["failed"].get(iid, 0) + 1
-            if s["failed"][iid] < 2:
-                s["queue"].append([iid, url, ts])
+            st["failed"][iid] = st["failed"].get(iid, 0) + 1
+            if st["failed"][iid] < 2:
+                st["queue"].append([iid, url, ts])
                 print("  вернём в конец очереди:", iid)
             else:
                 print("  брошен:", iid)
 
-    if len(s["published"]) > 50000:
-        keep = list(s["published"])[-20000:]
-        s["published"] = {k: s["published"][k] for k in keep}
-    if len(s["failed"]) > 5000:
-        s["failed"] = {}
+    if len(st["published"]) > 50000:
+        keep = list(st["published"])[-20000:]
+        st["published"] = {k: st["published"][k] for k in keep}
+    if len(st["failed"]) > 5000:
+        st["failed"] = {}
 
     json.dump(st, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
     print("готово, публикаций за запуск:", done)
