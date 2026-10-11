@@ -4,8 +4,8 @@ ivi.am -> Telegram.
 Публикует объявления, обновлённые продавцом за последние 24 часа.
 Каждое объявление выходит один раз: id попадает в state-ivi.json -> "published".
 Если на карточке нет времени, дата считается концом дня.
-Из разделов исключены: услуги, работа, бизнес, прочие объявления,
-аренда недвижимости, автосервис, стройка/ремонт.
+Название, цена и место берутся из карточки раздела, фото — только этого объявления,
+описание — из блока после строки "N <id>".
 """
 import os
 import re
@@ -57,14 +57,25 @@ HDRS = {
 }
 
 LINK_RE  = re.compile(r"/ru/item/([a-z0-9][a-z0-9\-]*?)-(\d{1,12})\.html", re.I)
-PHOTO_RE = re.compile(
-    r'(?:src|data-src)="([^"]*?/files/images/items/\d+/[0-9a-z]+\.(?:jpg|jpeg|png|webp))"',
-    re.I)
 PRICE_RE = re.compile(r"(\d[\d\s]{0,12})\s*(֏|\$|€|₽)")
 UPD_RE   = re.compile(r"(?:Обновлено|Թարմացվել է)\s*:?\s*([^|]{1,40})")
 REL_RE   = re.compile(r"([^|]{0,20}(?:Сегодня|Вчера|այսօր|երեկ)\s+\d{1,2}:\d{2})")
+TITLE_RE = re.compile(r'title="([^"]{2,120})"')
 MONTHS   = {"янв": 1, "фев": 2, "мар": 3, "апр": 4, "май": 5, "мая": 5, "июн": 6,
             "июл": 7, "авг": 8, "сен": 9, "окт": 10, "ноя": 11, "дек": 12}
+
+# служебные фразы сайта, которые не должны попадать в описание
+JUNK = ("вход", "добавить объявлен", "мой профиль", "մուտք", "ավելացնել հայտարար",
+        "премиум", "premium", "vip", "избранное", "все объявлен", "показать телефон",
+        "написать продавцу", "сообщить", "жалоб", "наверх", "facebook", "հավանել",
+        "тэг", "регион", "категор", "today", "հայտարարություն")
+
+def photo_re(iid):
+    """Ссылки на фото только этого объявления: имя файла начинается с его id."""
+    return re.compile(
+        r'(?:src|data-src|data-original|data-lazy)="'
+        r'([^"]*?/files/images/items/\d+/' + str(iid) +
+        r'[0-9a-z]*\.(?:jpg|jpeg|png|webp))"', re.I)
 
 # ---------- сеть ----------
 
@@ -100,6 +111,18 @@ def find_price(txt):
     if not m:
         return ""
     return " ".join(m.group(1).split()) + " " + m.group(2)
+
+def clean_desc(text, limit=700):
+    parts = [p.strip(" |·—") for p in re.split(r"\s*\|\s*|<br\s*/?>", text or "")]
+    keep = []
+    for p in parts:
+        if len(p) < 5:
+            continue
+        low = p.lower()
+        if any(j in low for j in JUNK):
+            continue
+        keep.append(p)
+    return " ".join(keep)[:limit]
 
 def parse_updated(s):
     """'Сегодня 19:03' / 'Вчера 22:10' / '11 октября' / '11.10.2026' -> unix-время."""
@@ -143,7 +166,7 @@ def is_fresh(ts):
     return 0 <= now - ts <= FRESH_H * 3600
 
 def card_scan(h, slug, limit):
-    """Карточки раздела: id, ссылка, «Обновлено», цена, превью-фото."""
+    """Карточки раздела: id, ссылка, название, цена, «Обновлено», фото."""
     ms = list(LINK_RE.finditer(h))
     out = {}
     skip = SKIP_SUB.get(slug, ())
@@ -153,7 +176,7 @@ def card_scan(h, slug, limit):
         j = i + 1
         while j < len(ms) and ms[j].group(2) == iid:
             j += 1                     # карточка ссылается на объявление дважды
-        start = ms[i - 1].end() if i > 0 else 0        # включаем открытые теги карточки
+        start = ms[i - 1].end() if i > 0 else 0       # включаем открытые теги карточки
         end = ms[j].start() if j < len(ms) else min(len(h), ms[j - 1].end() + 3000)
         win = h[start:end]
         url = BASE + ms[i].group(0)
@@ -163,48 +186,34 @@ def card_scan(h, slug, limit):
         txt = plain(win)[:500]
         mu = UPD_RE.search(txt) or REL_RE.search(txt)
         upd = mu.group(1).strip(" |·—") if mu else ""
-        ph = PHOTO_RE.search(win)
+        mt = TITLE_RE.search(win)
+        ph = photo_re(iid).search(win)
         out[iid] = {
             "id": iid,
             "url": url,
+            "title": htmllib.unescape(mt.group(1)).strip() if mt else "",
+            "price": find_price(txt),
             "updated_txt": upd,
             "ts": parse_updated(upd),
-            "price": find_price(txt),
             "photo": ph.group(1) if ph else "",
         }
         if len(out) >= limit:
             break
     return out
 
-def item_data(sess, url):
+def item_data(sess, url, iid):
+    """Фото и описание объявления. Название и цену даёт карточка раздела."""
     h = fetch(sess, url)
     if not h:
         return None
-    for tail in ("Похожие", "Նման", "Այլ հայտարարություններ"):
+    for tail in ("Похожие", "Последние Обявления", "Նման", "Այլ հայտարարություններ"):
         cut = h.find(tail)
         if cut > 0:
             h = h[:cut]
             break
 
-    title = ""
-    m = re.search(r"<h1[^>]*>(.*?)</h1>", h, re.S)
-    if m:
-        title = plain(m.group(1))
-    if not title:
-        m = re.search(r'property="og:title"\s+content="([^"]+)"', h, re.I)
-        if m:
-            title = htmllib.unescape(m.group(1)).strip()
-
-    txt = plain(h)
-    price = find_price(txt)
-
-    place = ""
-    m = re.search(r"([А-Яа-яЁёA-Za-z][^|<>]{2,40}?)\s*\|\s*\d{2}\.\d{2}\.\d{4}", txt)
-    if m:
-        place = re.sub(r"\s+", " ", m.group(1)).strip(" ,")
-
     photos = []
-    for u in PHOTO_RE.findall(h):
+    for u in photo_re(iid).findall(h):
         if u.startswith("//"):
             u = "https:" + u
         if u not in photos:
@@ -214,19 +223,28 @@ def item_data(sess, url):
         if m:
             photos = [htmllib.unescape(m.group(1))]
 
-    desc = ""
-    m = re.search(r'class="[^"]*(?:desc|text|opisanie)[^"]*"[^>]*>(.*?)</div>',
-                  h, re.S | re.I)
-    if m:
-        desc = plain(m.group(1))
-    if not desc:
-        m = re.search(r'property="og:description"\s+content="([^"]+)"', h, re.I)
-        if m:
-            desc = htmllib.unescape(m.group(1)).strip()
-    if title and desc.startswith(title):
-        desc = desc[len(title):].strip(" -—|")
+    txt = plain(h)
 
-    print(f"  {url.rsplit('-', 1)[-1]}: фото {len(photos)}, цена «{price}», место «{place}»")
+    title = ""
+    m = re.search(r"<h1[^>]*>(.*?)</h1>", h, re.S)
+    if m:
+        title = plain(m.group(1))
+
+    # цена — только из шапки объявления, до строки «... | N <id>»
+    mi = re.search(r"\|\s*N\s*" + str(iid), txt)
+    head_zone = txt[:mi.start()] if mi else txt[:1500]
+    price = find_price(head_zone)
+
+    place = ""
+    m = re.search(r"([А-Яа-яЁёA-Za-z][^|<>]{2,40}?)\s*\|\s*\d{2}\.\d{2}\.\d{4}", txt)
+    if m:
+        place = re.sub(r"\s+", " ", m.group(1)).strip(" ,")
+
+    # описание — от строки «| N <id>» до конца, без служебных фраз
+    desc = clean_desc(txt[mi.end():]) if mi else ""
+
+    print(f"  {iid}: фото {len(photos)}, цена «{price}», место «{place}», "
+          f"описание {len(desc)} знаков")
     return {"title": title, "price": price, "place": place,
             "desc": desc, "photos": photos[:10], "url": url}
 
@@ -240,41 +258,46 @@ def translate(sess, text):
         return text
     if text in TR_CACHE:
         return TR_CACHE[text]
-    try:
-        r = sess.get("https://translate.googleapis.com/translate_a/single",
-                     params={"client": "gtx", "sl": "auto", "tl": "ru",
-                             "dt": "t", "q": text[:2000]}, timeout=30)
-        res = "".join(p[0] for p in r.json()[0] if p and p[0]).strip()
-        if res:
-            TR_CACHE[text] = res
-            return res
-    except Exception as e:
-        print("  перевод недоступен:", type(e).__name__)
+    for attempt in range(2):
+        try:
+            r = sess.get("https://translate.googleapis.com/translate_a/single",
+                         params={"client": "gtx", "sl": "auto", "tl": "ru",
+                                 "dt": "t", "q": text[:2000]}, timeout=30)
+            res = "".join(p[0] for p in r.json()[0] if p and p[0]).strip()
+            if res:
+                TR_CACHE[text] = res
+                return res
+        except Exception as e:
+            print("  перевод недоступен:", type(e).__name__)
+        time.sleep(2)
     return text
 
 def has_cyr(s):
     return bool(re.search(r"[А-Яа-яЁё]", s or ""))
 
-def headline(sess, d):
-    t = translate(sess, d["title"]).strip()
+def headline(sess, e, d):
+    t = translate(sess, e.get("title") or (d["title"] if d else "")).strip()
     if has_cyr(t):
         return t
-    alt = translate(sess, d["desc"][:300]).strip()
+    alt = translate(sess, d["desc"][:300]).strip() if d else ""
     if has_cyr(alt) and len(alt.split()) >= 3:
         return re.split(r"[.!?]\s", alt)[0].strip()[:90]
     return t[:90]
 
-def caption(sess, d):
-    head = headline(sess, d)
-    if not head:
+def caption(sess, e, d):
+    head = headline(sess, e, d)
+    if not head and not (d and d["photos"]):
         return ""
-    lines = [head]
-    if d["price"]:
-        lines.append(d["price"])
-    if d["place"]:
-        lines.append(d["place"])
-    if d["desc"]:
-        lines.append(translate(sess, d["desc"][:700]))
+    lines = [head] if head else []
+    price = e.get("price") or (d["price"] if d else "")
+    place = e.get("place") or (d["place"] if d else "")
+    desc = d["desc"] if d else ""
+    if price:
+        lines.append(price)
+    if place:
+        lines.append(place)
+    if desc:
+        lines.append(translate(sess, desc))
     return "\n\n".join(x for x in lines if x)[:1024]
 
 # ---------- Telegram ----------
@@ -338,16 +361,27 @@ def load_st():
             print("state-ivi.json не читается:", e)
     return {}
 
+def norm_queue(st):
+    """Очередь хранится словарями; старый формат [id, url, ts] тоже принимаем."""
+    q = []
+    for e in st.get("queue", []):
+        if isinstance(e, dict) and e.get("id"):
+            q.append(e)
+        elif isinstance(e, (list, tuple)) and len(e) >= 3:
+            q.append({"id": e[0], "url": e[1], "ts": int(e[2]),
+                      "title": "", "price": ""})
+    st["queue"] = q
+
 def main():
     if not TOKEN or not CHAT_ID:
         print("нет TELEGRAM_TOKEN / TELEGRAM_CHAT_ID")
         return
 
     st = load_st()
-    st.setdefault("queue", [])       # [[id, url, ts], ...]
     st.setdefault("published", {})   # id -> ts
     st.setdefault("failed", {})
     st.setdefault("last_publish", 0)
+    norm_queue(st)
 
     sess = requests.Session()
     now = time.time()
@@ -359,18 +393,19 @@ def main():
         fresh = [c for c in cards.values() if is_fresh(c["ts"])]
         print(f"[{slug}] {name}: карточек {len(cards)}, свежих за {FRESH_H}ч {len(fresh)}")
         for c in list(cards.values())[:SAMPLE]:
-            print(f"    {c['id']}: обновлено «{c['updated_txt']}» свежее={is_fresh(c['ts'])}")
+            print(f"    {c['id']}: «{c['title']}» {c['price']} "
+                  f"обновлено «{c['updated_txt']}» свежее={is_fresh(c['ts'])}")
+        known = {e["id"] for e in st["queue"]}
         for c in fresh:
-            if c["id"] in st["published"]:
+            if c["id"] in st["published"] or c["id"] in known:
                 continue
-            if any(q[0] == c["id"] for q in st["queue"]):
-                continue
-            st["queue"].append([c["id"], c["url"], int(c["ts"])])
+            st["queue"].append({"id": c["id"], "url": c["url"], "ts": int(c["ts"]),
+                                "title": c["title"], "price": c["price"]})
         time.sleep(1)
 
     # 2. старое выкидываем, хвост очереди ограничиваем
     far = time.time() - FRESH_H * 3600
-    st["queue"] = [q for q in st["queue"] if q[2] >= far]
+    st["queue"] = [e for e in st["queue"] if e.get("ts", 0) >= far]
     while len(st["queue"]) > QUEUE_MAX:
         st["queue"].pop(0)
     print("в очереди:", len(st["queue"]))
@@ -381,15 +416,16 @@ def main():
         if not TEST and now - st["last_publish"] < INTERVAL:
             print("ждём интервал между публикациями")
             break
-        iid, url, ts = st["queue"].pop(0)
+        e = st["queue"].pop(0)
+        iid, url = e["id"], e["url"]
         if iid in st["published"]:
             continue
         d = None
         try:
-            d = item_data(sess, url)
-        except Exception as e:
-            print("ошибка разбора:", e)
-        cap = caption(sess, d) if d else ""
+            d = item_data(sess, url, iid)
+        except Exception as ex:
+            print("ошибка разбора:", ex)
+        cap = caption(sess, e, d) if d else ""
         if TEST:
             print("---", url)
             print(cap or "нечего публиковать")
@@ -404,7 +440,7 @@ def main():
         else:
             st["failed"][iid] = st["failed"].get(iid, 0) + 1
             if st["failed"][iid] < 2:
-                st["queue"].append([iid, url, ts])
+                st["queue"].append(e)
                 print("  вернём в конец очереди:", iid)
             else:
                 print("  брошен:", iid)
