@@ -3,6 +3,7 @@
 ivi.am -> Telegram.
 Публикует объявления, обновлённые продавцом за последние 24 часа.
 Каждое объявление выходит один раз: id попадает в state-ivi.json -> "published".
+Если на карточке нет времени, дата считается концом дня.
 Из разделов исключены: услуги, работа, бизнес, прочие объявления,
 аренда недвижимости, автосервис, стройка/ремонт.
 """
@@ -59,7 +60,7 @@ LINK_RE  = re.compile(r"/ru/item/([a-z0-9][a-z0-9\-]*?)-(\d{1,12})\.html", re.I)
 PHOTO_RE = re.compile(
     r'(?:src|data-src)="([^"]*?/files/images/items/\d+/[0-9a-z]+\.(?:jpg|jpeg|png|webp))"',
     re.I)
-PRICE_RE = re.compile(r"(\d[\d\s]{0,12})\s*֏")
+PRICE_RE = re.compile(r"(\d[\d\s]{0,12})\s*(֏|\$|€|₽)")
 UPD_RE   = re.compile(r"(?:Обновлено|Թարմացվել է)\s*:?\s*([^|]{1,40})")
 REL_RE   = re.compile(r"([^|]{0,20}(?:Сегодня|Вчера|այսօր|երեկ)\s+\d{1,2}:\d{2})")
 MONTHS   = {"янв": 1, "фев": 2, "мар": 3, "апр": 4, "май": 5, "мая": 5, "июн": 6,
@@ -98,33 +99,42 @@ def find_price(txt):
     m = PRICE_RE.search(txt or "")
     if not m:
         return ""
-    return " ".join(m.group(1).split()) + " ֏"
+    return " ".join(m.group(1).split()) + " " + m.group(2)
 
 def parse_updated(s):
-    """'Сегодня 19:03' / 'Вчера 22:10' / '10 октября' -> unix-время или None."""
+    """'Сегодня 19:03' / 'Вчера 22:10' / '11 октября' / '11.10.2026' -> unix-время."""
     s = (s or "").strip()
     if not s:
         return None
     now = datetime.now(TZ)
-    m = re.search(r"(\d{1,2}):(\d{2})", s)
-    hh, mm = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+    mt = re.search(r"(\d{1,2}):(\d{2})", s)
+    hh, mm = (int(mt.group(1)), int(mt.group(2))) if mt else (23, 59)
     low = s.lower()
     if "сегодня" in low or "այսօր" in low:
         d = now
     elif "вчера" in low or "երեկ" in low:
         d = now - timedelta(days=1)
     else:
-        m2 = re.search(r"(\d{1,2})\s+([А-Яа-яЁё]+)", s)
-        if not m2:
-            return None
-        mon = MONTHS.get(m2.group(2).lower()[:3])
-        if not mon:
-            return None
-        year = now.year
-        d = datetime(year, mon, int(m2.group(1)), hh, mm, tzinfo=TZ)
-        if d > now + timedelta(days=1):
-            d = datetime(year - 1, mon, int(m2.group(1)), hh, mm, tzinfo=TZ)
-    return d.replace(hour=hh, minute=mm, second=0, microsecond=0).timestamp()
+        md = re.search(r"(\d{1,2})[.\s]+(\d{1,2})[.\s]+(\d{2,4})", s)
+        if md:
+            day, mon, year = int(md.group(1)), int(md.group(2)), int(md.group(3))
+            year = year + 2000 if year < 100 else year
+            try:
+                d = datetime(year, mon, day, hh, mm, tzinfo=TZ)
+            except ValueError:
+                return None
+        else:
+            mn = re.search(r"(\d{1,2})\s+([А-Яа-яЁё]+)", s)
+            if not mn:
+                return None
+            mon = MONTHS.get(mn.group(2).lower()[:3])
+            if not mon:
+                return None
+            year = now.year
+            d = datetime(year, mon, int(mn.group(1)), hh, mm, tzinfo=TZ)
+            if d > now + timedelta(days=1):
+                d = datetime(year - 1, mon, int(mn.group(1)), hh, mm, tzinfo=TZ)
+    return d.replace(hour=hh, minute=mm, second=59, microsecond=0).timestamp()
 
 def is_fresh(ts):
     if not ts:
@@ -143,7 +153,7 @@ def card_scan(h, slug, limit):
         j = i + 1
         while j < len(ms) and ms[j].group(2) == iid:
             j += 1                     # карточка ссылается на объявление дважды
-        start = ms[i].start()
+        start = ms[i - 1].end() if i > 0 else 0        # включаем открытые теги карточки
         end = ms[j].start() if j < len(ms) else min(len(h), ms[j - 1].end() + 3000)
         win = h[start:end]
         url = BASE + ms[i].group(0)
@@ -157,7 +167,6 @@ def card_scan(h, slug, limit):
         out[iid] = {
             "id": iid,
             "url": url,
-            "text": txt,
             "updated_txt": upd,
             "ts": parse_updated(upd),
             "price": find_price(txt),
@@ -350,7 +359,7 @@ def main():
         fresh = [c for c in cards.values() if is_fresh(c["ts"])]
         print(f"[{slug}] {name}: карточек {len(cards)}, свежих за {FRESH_H}ч {len(fresh)}")
         for c in list(cards.values())[:SAMPLE]:
-            print(f"    {c['id']}: «{c['text'][:140]}»")
+            print(f"    {c['id']}: обновлено «{c['updated_txt']}» свежее={is_fresh(c['ts'])}")
         for c in fresh:
             if c["id"] in st["published"]:
                 continue
