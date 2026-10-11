@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 """
 ivi.am -> Telegram.
-Публикует объявления, которые продавец обновил за последние 24 часа.
+Публикует объявления, обновлённые продавцом за последние 24 часа.
 Каждое объявление выходит один раз: id попадает в state.json -> "ivi" -> "published".
-Состояние хранится внутри общего state.json, поэтому workflow менять не нужно.
+Состояние живёт внутри общего state.json, поэтому менять workflow не нужно.
+Из разделов исключены: услуги, работа, бизнес, прочие объявления,
+аренда недвижимости, автосервис, стройка/ремонт.
 """
 import os
 import re
@@ -23,7 +25,7 @@ INTERVAL    = 10 * 60    # пауза между публикациями, се�
 PUBLISH_MAX = 1          # сколько публиковать за один запуск
 QUEUE_MAX   = 300        # предел очереди
 FRESH_H     = 24         # сколько часов объявление считается свежим после обновления
-PER_CAT     = 40         # сколько карточек смотреть в разделе
+PER_CAT     = 60         # сколько карточек смотреть в разделе
 TEST        = False      # True -> ничего не отправлять, только показать разбор в логе
 
 BASE = "https://ivi.am"
@@ -32,9 +34,20 @@ TZ   = timezone(timedelta(hours=4))          # время сайта (Ерева
 SECTIONS = {
     "elektronika":         "Электроника",
     "dom-i-sad":           "Дом и сад",
-    "detskiy-mir":         "Детский мир",
+    "transport":           "Транспорт",
     "moda-i-stil":         "Мода и стиль",
-    "hobbi-otdyh-i-sport": "Хобби и спорт",
+    "detskiy-mir":         "Детский мир",
+    "zhivotnye":           "Животные",
+    "hobbi-otdyh-i-sport": "Искусство и хобби",
+    "ansharj-guyq":        "Недвижимость (только продажа)",
+    "lost-found":          "Потеряно / найдено",
+}
+
+# подкатегории, которые не берём, даже если они попали в раздел
+SKIP_SUB = {
+    "ansharj-guyq": ("vardzakalotyon",),    # аренда недвижимости
+    "transport":    ("avto-moto-uslugi",),  # автосервис, мойки
+    "dom-i-sad":    ("stroitelstvo-remont",),  # стройка и ремонт
 }
 
 HDRS = {
@@ -107,9 +120,10 @@ def parse_updated(s):
         mon = MONTHS.get(m2.group(2).lower()[:3])
         if not mon:
             return None
-        d = datetime(now.year, mon, int(m2.group(1)), hh, mm, tzinfo=TZ)
+        year = now.year
+        d = datetime(year, mon, int(m2.group(1)), hh, mm, tzinfo=TZ)
         if d > now + timedelta(days=1):
-            d = datetime(now.year - 1, mon, int(m2.group(1)), hh, mm, tzinfo=TZ)
+            d = datetime(year - 1, mon, int(m2.group(1)), hh, mm, tzinfo=TZ)
     return d.replace(hour=hh, minute=mm, second=0, microsecond=0).timestamp()
 
 def is_fresh(ts):
@@ -118,25 +132,29 @@ def is_fresh(ts):
     now = time.time()
     return 0 <= now - ts <= FRESH_H * 3600
 
-def card_scan(h, limit):
+def card_scan(h, slug, limit):
     """Карточки раздела: id, ссылка, «Обновлено», цена, превью-фото."""
     ms = list(LINK_RE.finditer(h))
     out = {}
+    skip = SKIP_SUB.get(slug, ())
     for i, m in enumerate(ms):
         iid = m.group(2)
         if iid in out:
             continue
         end = ms[i + 1].start() if i + 1 < len(ms) else min(len(h), m.end() + 3000)
         win = h[m.start():end]
+        if any(tok in win for tok in skip):
+            continue
         txt = plain(win)[:400]
         mu = UPD_RE.search(txt)
+        ph = PHOTO_RE.search(win)
         out[iid] = {
             "id": iid,
             "url": BASE + m.group(0),
             "updated_txt": mu.group(1).strip() if mu else "",
             "ts": parse_updated(mu.group(1) if mu else ""),
             "price": find_price(txt),
-            "photo": (PHOTO_RE.search(win).group(1) if PHOTO_RE.search(win) else ""),
+            "photo": ph.group(1) if ph else "",
         }
         if len(out) >= limit:
             break
@@ -318,15 +336,13 @@ def main():
     sess = requests.Session()
     now = time.time()
 
-    # 1. что обновлено за последние сутки
-    fresh_ids = set()
+    # 1. все объявления, обновлённые за последние 24 часа
     for slug, name in SECTIONS.items():
         h = fetch(sess, f"{BASE}/ru/search/{slug}/")
-        cards = card_scan(h, PER_CAT)
+        cards = card_scan(h, slug, PER_CAT)
         fresh = [c for c in cards.values() if is_fresh(c["ts"])]
         print(f"[{slug}] {name}: карточек {len(cards)}, свежих за {FRESH_H}ч {len(fresh)}")
         for c in fresh:
-            fresh_ids.add(c["id"])
             if c["id"] in s["published"]:
                 continue
             if any(q[0] == c["id"] for q in s["queue"]):
