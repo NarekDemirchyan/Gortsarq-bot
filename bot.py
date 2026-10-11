@@ -331,6 +331,7 @@ def main():
 
     save(st)
 
-from fetcher import jina
+# единственное изменение: translate берём из fetcher (с резервными путями)
+from fetcher import jina, translate
 
 main()
