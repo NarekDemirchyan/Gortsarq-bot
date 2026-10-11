@@ -20,7 +20,7 @@ TOKEN    = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 STATE      = "state.json"
-INTERVAL   = 10 * 60      # пауза между публикациями, сек
+INTERVAL = 10 * 60
 QUEUE_MAX  = 250          # максимум объявлений в очереди
 FRESH_H    = 24           # сколько часов объявление считается свежим
 TEST       = False        # True -> ничего не отправлять, только лог
