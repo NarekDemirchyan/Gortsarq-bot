@@ -19,12 +19,12 @@ import requests
 TOKEN    = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-STATE      = "state.json"
-INTERVAL = 10 * 60
-PUBLISH_MAX = 3           # сколько публикаций за один запуск (1 = как сейчас)
-QUEUE_MAX  = 250          # максимум объявлений в очереди
-FRESH_H    = 24           # сколько часов объявление считается свежим
-TEST       = False        # True -> ничего не отправлять, только лог
+STATE       = "state.json"
+INTERVAL    = 10 * 60     # пауза между публикациями, сек
+PUBLISH_MAX = 3           # сколько публикаций за один запуск (1 = как было)
+QUEUE_MAX   = 250         # максимум объявлений в очереди
+FRESH_H     = 24          # сколько часов объявление считается свежим
+TEST        = False       # True -> ничего не отправлять, только лог
 
 BASE = "https://www.list.am"
 TZ   = timezone(timedelta(hours=4))          # время сайта (Ереван)
@@ -55,9 +55,6 @@ BLOCKED  = ("just a moment", "attention required", "enable javascript",
 DESC_END = (r"(?:Номер объявления|Пожаловаться|Отзыв|Написать|Позвонить|Похожие|"
             r"Комментарии|Информация о (?:товаре|продавце)|Download App|На главную|"
             r"Report|Смотреть все)")
-
-JUNK_LINE = ("Войти", "Разместить объявление", "Помощь", "Обратная связь",
-             "Создать свой магазин", "Верификация", "List Реклама", "Ваша корзина")
 
 def is_blocked(text):
     t = (text or "").strip()
@@ -93,6 +90,13 @@ def card_place(text, pos, span=220):
     seg = " ".join(seg.split()).strip(" ,·—")
     return seg[-40:].strip(" ,") if 2 <= len(seg) <= 60 else ""
 
+def full_photo(u):
+    """img.list.am/r/692/96450692.webp -> img.list.am/f/692/96450692.webp"""
+    u = htmllib.unescape(u or "")
+    if u.startswith("//"):
+        u = "https:" + u
+    return re.sub(r"(img\.list\.am)/[a-z]+/", r"\1/f/", u, count=1)
+
 def parse_cards(text):
     """{id: {id, url, title, price, place, photo, ts}} по карточкам раздела."""
     out = {}
@@ -107,10 +111,7 @@ def parse_cards(text):
         tm = nearest(TITLE_RE, text, pos)
         dm = nearest(DATE_RE, text, pos)
 
-        photo = ""
-        if pm:
-            photo = full_photo(pm.group(0))
-
+        photo = full_photo(pm.group(0)) if pm else ""
         title = clean_title((tm.group(1) or tm.group(2)) if tm else "")
         price = " ".join(pr.group(0).split()) if pr else ""
 
@@ -126,13 +127,6 @@ def parse_cards(text):
         out[iid] = {"id": iid, "url": f"{BASE}/ru/item/{iid}", "title": title,
                     "price": price, "place": place, "photo": photo, "ts": ts}
     return out
-
-def full_photo(u):
-    """img.list.am/r/692/96450692.webp -> img.list.am/f/692/96450692.webp"""
-    u = htmllib.unescape(u or "")
-    if u.startswith("//"):
-        u = "https:" + u
-    return re.sub(r"(img\.list\.am)/[a-z]+/", r"\1/f/", u, count=1)
 
 def is_fresh(ts):
     if not ts:
@@ -155,8 +149,7 @@ def direct(sess, url):
 def extract_desc(text):
     if not text:
         return ""
-    m = re.search(r"Описание\s*[:：]?\s*(.{30,4000}?)\s*(?:" + DESC_END + r"|\Z)",
-                  text, re.S)
+    m = re.search(r"Описание\s*[:：]?\s*(.{30,4000}?)\s*(?:" + DESC_END + r"|\Z)", text, re.S)
     if not m:
         return ""
     s = " ".join(m.group(1).split())
@@ -178,20 +171,15 @@ def item_extra(sess, iid):
     md = jina(sess, url)                     # markdown -> описание
 
     photos, desc = {}, ""
-    for src in (html.replace("\\/", "/") if html else "", md or ""):
+    for src in ((html.replace("\\/", "/") if html else ""), md or ""):
         for m in PHOTO_RE.finditer(src):
             u = full_photo(m.group(0))
             photos[u.rsplit("/", 1)[-1]] = u
     if html:
         desc = extract_desc(plain(html))
     if not desc:
-        desc = extract_desc(md)
-
-    cut = (md or "").find("Похожие")
-    if cut > 0:
-        md = md[:cut]
-    if not desc:
-        desc = extract_desc(md)
+        cut = (md or "").find("Похожие")
+        desc = extract_desc(md[:cut] if cut > 0 else md)
 
     print(f"  {iid}: фото {len(photos)}, описание {len(desc)} знаков")
     return {"photos": list(photos.values())[:10], "desc": desc}
@@ -212,9 +200,6 @@ def translate(sess, text):
     except Exception as e:
         print("  перевод недоступен:", type(e).__name__)
     return text
-
-def has_cyr(s):
-    return bool(re.search(r"[А-Яа-яЁё]", s or ""))
 
 def make_caption(sess, e, extra):
     head = translate(sess, e["title"]).strip()
@@ -351,10 +336,10 @@ def main():
             print("---", e["url"], "|", make_caption(sess, e, {"desc": ""}))
         return
 
-    # 3. публикация одной карточки
+    # 3. публикации
     if st["queue"] and now - st["last_publish"] >= INTERVAL:
-        tried = 0
-        while st["queue"] and tried < 3:
+        sent, tried = 0, 0
+        while st["queue"] and sent < PUBLISH_MAX and tried < PUBLISH_MAX * 3:
             tried += 1
             e = st["queue"].pop(0)
             if e["id"] in st["published"]:
@@ -378,11 +363,15 @@ def main():
             if ok:
                 st["last_publish"] = now
                 st["published"][e["id"]] = now
+                sent += 1
                 print("опубликовано:", e["id"])
-                break
+                continue
 
             st["failed"][e["id"]] = st["failed"].get(e["id"], 0) + 1
             print("  не вышло:", e["id"], "ошибок", st["failed"][e["id"]])
+            if st["failed"][e["id"]] < 2:
+                st["queue"].append(e)          # вернём в конец очереди
+        print("за запуск опубликовано:", sent)
     else:
         print("публиковать нечего или ещё не прошёл интервал")
 
