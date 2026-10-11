@@ -1,221 +1,198 @@
 # -*- coding: utf-8 -*-
-"""Էջերի բերում և markdown/HTML փոխարկում։
-Զննարկիչ (Playwright) → եթե պատը փակում է, պահուստ r.jina.ai։
-
-jina() -> markdown կամ "" ձախողման դեպքում։
-extra={"x-respond-with": "html"} -> չմշակված HTML։
-
-PROXY_URL  - պրոքսի (ըստ ցանկության)։
-JINA_KEY   - r.jina.ai բանալի (ըստ ցանկության, անվճար)։
-"""
+# fetcher.py — ընդհանուր ընթերցիչ (list.am, gortsarq.am և այլն)
+# Հերթականությունը՝ 1) ուղիղ requests (բրաուզերի headers) 2) r.jina.ai x-engine: browser
+# 3) անվճար պրոքսի։ jina() վերադարձնում է նույն markdown-ը, ինչ r.jina.ai-ն, որպեսզի
+# bot.py / gortsarq.py / arenda.py-ի պարսերները մնան անփոփոխ։
+# x-respond-with: html դեպքում վերադարձվում է չմշակված HTML։
 
 import os
-import shutil
-import subprocess
+import re
 import time
-
-from markdownify import markdownify
-
-BLOCKED = ("just a moment", "attention required", "checking your browser",
-           "cf-browser-verification", "cf_chl",
-           "performing security verification")
-
-STEALTH = """
-Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-window.chrome = { runtime: {} };
-Object.defineProperty(navigator, 'languages', {get: () => ['ru-RU','ru','hy','en']});
-Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
-"""
+import requests
+from urllib.parse import quote, urljoin
 
 JINA = "https://r.jina.ai/"
-_pw = None
-_browser = None
-_ctx = None
-_xvfb_tried = False
+JINA_KEY = os.environ.get("JINA_KEY", "")
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
 
-def _proxies():
-    p = os.environ.get("PROXY_URL", "").strip()
-    if not p:
-        return None
-    return {"http": p, "https": p}
+HARD_BLOCK = ("just a moment", "performing security verification",
+              "attention required", "checking your browser")
 
-def _display():
-    global _xvfb_tried
-    if os.environ.get("DISPLAY"):
-        return os.environ["DISPLAY"]
-    if _xvfb_tried:
-        return ""
-    _xvfb_tried = True
-    if shutil.which("Xvfb") is None:
-        print("  Xvfb չկա, աշխատում է headless")
-        return ""
+PROXIES = (
+    "https://api.allorigins.win/raw?url=",
+    "https://api.codetabs.com/v1/proxy?quest=",
+)
+
+IMG_JUNK = ("list.am/img/", "gortsarq.am/img/", "/icons/", "flag_", "logo", "sprite", "/static/")
+
+def is_blocked(text):
+    t = (text or "").strip()
+    if len(t) < 800:
+        return True
+    low = t.lower()
+    return any(m in low for m in HARD_BLOCK)
+
+def _unesc(s):
+    s = s or ""
+    for a, b in (("&amp;", "&"), ("&quot;", '"'), ("&#39;", "'"), ("&apos;", "'"),
+                 ("&lt;", "<"), ("&gt;", ">"), ("&nbsp;", " "),
+                 ("&laquo;", "«"), ("&raquo;", "»")):
+        s = s.replace(a, b)
+    return s
+
+def _base_of(url):
+    parts = url.split("/")
+    return "/".join(parts[:3]) if len(parts) >= 3 else url
+
+def _metas(h):
+    out = {}
+    for tag in re.findall(r"(?is)<meta\b[^>]*>", h or ""):
+        k = re.search(r'(?is)(?:property|name)\s*=\s*["\']([^"\']+)["\']', tag)
+        v = re.search(r'(?is)content\s*=\s*["\'](.*?)["\']', tag)
+        if k and v:
+            out.setdefault(k.group(1).strip().lower(), _unesc(v.group(1)).strip())
+    return out
+
+def _strip_tags(t):
+    t = re.sub(r"(?is)<(script|style|noscript|svg|head)\b[^>]*>.*?</\1>", " ", t or "")
+    t = re.sub(r"(?is)<br\s*/?>", "\n", t)
+    t = re.sub(r"(?is)</(p|div|li|tr|h[1-6]|section|article|span)>", "\n", t)
+    t = re.sub(r"(?s)<[^>]+>", " ", t)
+    t = _unesc(t)
+    t = re.sub(r"[ \t\r\f\v]+", " ", t)
+    t = re.sub(r"\n[ \t]+", "\n", t)
+    t = re.sub(r"\n{2,}", "\n\n", t)
+    return t.strip()
+
+def _links_md(h, base):
+    def a(m):
+        href = urljoin(base, _unesc(m.group(1)).strip())
+        txt = " ".join(_strip_tags(m.group(2)).split()) or href
+        return "\n[%s](%s)\n" % (txt, href)
+    return re.sub(r'(?is)<a\b[^>]*href\s*=\s*["\']([^"\']+)["\'][^>]*>(.*?)</a>', a, h or "")
+
+def _imgs(h, base):
+    urls = []
+    for m in re.finditer(r'(?is)<img\b[^>]*?(?:data-src|data-original|src)\s*=\s*["\']([^"\']+)["\']', h or ""):
+        u = urljoin(base, _unesc(m.group(1)).strip())
+        if re.search(r"\.(?:jpe?g|png|webp)(?:\?|$)", u, re.I) and u not in urls:
+            urls.append(u)
+    return urls
+
+def to_md(html, url):
+    base = _base_of(url)
+    meta = _metas(html)
+    text = _strip_tags(_links_md(html, base))
+
+    title = meta.get("og:title") or meta.get("twitter:title") or ""
+    if not title:
+        m = re.search(r"(?is)<title[^>]*>(.*?)</title>", html or "")
+        title = _strip_tags(m.group(1)) if m else ""
+    title = re.sub(r"\s*[-–—|]\s*(list\.am|gortsarq\.am).*$", "", title, flags=re.I).strip()
+    if not title:
+        m = re.search(r"(?is)<h1\b[^>]*>(.*?)</h1>", html or "")
+        title = _strip_tags(m.group(1)) if m else ""
+
+    desc = meta.get("og:description") or ""
+    if len(desc) < 40 or re.search(r"(list\.am|gortsarq)", desc, re.I):
+        paras = [p for p in text.split("\n")
+                 if 120 <= len(p) <= 900 and len(p.split()) >= 18]
+        if paras:
+            desc = max(paras, key=len)
+
+    price = ""
+    m = re.search(r"(\d[\d\s,\.]{0,15}?)\s*(֏|\$|€)", text)
+    if m:
+        price = re.sub(r"[.,]00$", "", m.group(1).strip()) + " " + m.group(2)
+
+    place = ""
+    m = re.search(r"([Ա-ՖA-ZА-ЯЁ][^›\n]{1,30}?)\s*›\s*([^›\n]{1,30})", text)
+    if m:
+        place = m.group(1).strip() + " › " + m.group(2).strip()
+
+    date = ""
+    m = re.search(r"\d{2}\.\d{2}\.\d{4}", text)
+    if m:
+        date = m.group(0)
+
+    out = []
+    if title:
+        out.append("# " + title)
+    if place:
+        out.append("[%s](%s)" % (place, url))
+    if price:
+        out.append(price)
+    out.append("Описание *")
+    out.append(desc)
+    if date:
+        out.append(date)
+    out.append("Номер объявления")
+    out.append(text)
+    if place:
+        out.append("Расположение *")
+        out.append(place)
+
+    imgs = [u for u in _imgs(html, base) if not any(j in u for j in IMG_JUNK)]
+    if imgs:
+        out.append("\n".join("![Image](%s)" % u for u in imgs))
+    return "\n\n".join(x for x in out if x)
+
+def _direct(sess, url):
     try:
-        subprocess.Popen(["Xvfb", ":99", "-screen", "0", "1366x900x24"],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        os.environ["DISPLAY"] = ":99"
-        time.sleep(1.5)
-        print("  Xvfb միացավ, աշխատում է headed")
-        return ":99"
-    except Exception:
-        return ""
-
-def _start():
-    global _pw, _browser
-    if _browser is None:
-        from playwright.sync_api import sync_playwright
-        _pw = sync_playwright().start()
-        args = ["--disable-blink-features=AutomationControlled",
-                "--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
-        proxy = None
-        p = os.environ.get("PROXY_URL", "").strip()
-        if p:
-            from urllib.parse import urlparse
-            u = urlparse(p)
-            proxy = {"server": "{}://{}:{}".format(u.scheme, u.hostname, u.port)}
-            if u.username:
-                proxy["username"] = u.username
-            if u.password:
-                proxy["password"] = u.password
-        display = _display()
-        kw = {"headless": not bool(display), "args": args}
-        if proxy:
-            kw["proxy"] = proxy
-        try:
-            _browser = _pw.chromium.launch(**kw)
-        except Exception:
-            _browser = _pw.chromium.launch(headless=True, args=args)
-    return _browser
-
-def _context():
-    global _ctx
-    if _ctx is None:
-        _ctx = _start().new_context(locale="ru-RU", timezone_id="Asia/Yerevan",
-                                    viewport={"width": 1366, "height": 900})
-        _ctx.add_init_script(STEALTH)
-        page = _ctx.new_page()
-        try:
-            page.goto("https://www.list.am/ru/", wait_until="domcontentloaded",
-                      timeout=60000)
-            page.wait_for_timeout(2500)
-        except Exception:
-            pass
-        page.close()
-    return _ctx
-
-def _drop_context():
-    global _ctx
-    try:
-        if _ctx:
-            _ctx.close()
-    except Exception:
-        pass
-    _ctx = None
-
-def _title(page):
-    try:
-        t = page.locator("h1")
-        if t.count():
-            return " ".join(t.first.inner_text().split())
-    except Exception:
-        pass
-    return " ".join(page.title().split())
-
-def _wait_ready(page, wait_seconds=45):
-    deadline = time.time() + wait_seconds
-    while time.time() < deadline:
-        try:
-            html = page.content() or ""
-        except Exception:
-            html = ""
-        if len(html) > 3000 and not any(m in html.lower() for m in BLOCKED):
-            return html
-        page.wait_for_timeout(2500)
-    try:
-        page.reload(wait_until="domcontentloaded", timeout=45000)
-        page.wait_for_timeout(3000)
-        return page.content() or ""
-    except Exception:
-        return ""
-
-def _browser_get(url, want_html):
-    page = None
-    try:
-        page = _context().new_page()
-        page.set_default_timeout(60000)
-        page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        html = _wait_ready(page)
-        for _ in range(3):
-            page.mouse.wheel(0, 4000)
-            page.wait_for_timeout(1000)
-        html = page.content() or html
-        title = _title(page)
-        page.close()
-        if len(html) < 3000 or any(m in html.lower() for m in BLOCKED):
-            print("  browser защита/пусто | title:", title[:80], "| len:", len(html))
-            _drop_context()
-            return ""
-        if want_html:
-            return html
-        md = markdownify(html, heading_style="ATX",
-                         strip=["script", "style", "noscript", "svg"])
-        return "# " + title + "\n\n" + md
+        r = sess.get(url, headers={
+            "User-Agent": UA,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "ru,hy;q=0.9,en;q=0.7",
+        }, timeout=30)
+        print("  ուղիղ՝ %s, %s նշան" % (r.status_code, len(r.text or "")))
+        if r.status_code == 200 and not is_blocked(r.text):
+            return r.text
     except Exception as e:
-        print("  browser ошибка:", type(e).__name__, str(e)[:150])
-        try:
-            if page:
-                page.close()
-        except Exception:
-            pass
-        return ""
+        print("  ուղիղ սխալ՝", type(e).__name__)
+    return ""
 
-def _jina_get(url, want_html):
+def _via_jina(sess, url, extra):
+    h = {"User-Agent": "curl/8.5.0", "x-engine": "browser"}
+    if JINA_KEY:
+        h["Authorization"] = "Bearer " + JINA_KEY
+    if extra:
+        h.update(extra)
     try:
-        import requests
-    except Exception:
-        return ""
-    headers = {}
-    if want_html:
-        headers["x-respond-with"] = "html"
-    key = os.environ.get("JINA_KEY", "").strip()
-    if key:
-        headers["Authorization"] = "Bearer " + key
-    try:
-        r = requests.get(JINA + url, headers=headers, timeout=90,
-                         proxies=_proxies())
-        text = r.text or ""
-        if r.status_code != 200:
-            print("  jina статус:", r.status_code)
-            return ""
+        r = sess.get(JINA + url, headers=h, timeout=35)
+        print("  jina browser՝ %s, %s նշան" % (r.status_code, len(r.text or "")))
+        if r.status_code == 200 and not is_blocked(r.text):
+            return r.text, True
     except Exception as e:
-        print("  jina ошибка:", type(e).__name__, str(e)[:120])
-        return ""
-    low = text.lower()
-    if len(text) < 1500 or any(m in low for m in BLOCKED):
-        print("  jina защита/пусто | len:", len(text))
-        return ""
-    if want_html:
-        return text
-    lines = text.splitlines()
-    title = ""
-    start = 0
-    for i, ln in enumerate(lines[:12]):
-        if ln.strip().lower().startswith("title:"):
-            title = ln.split(":", 1)[1].strip()
-            start = i + 1
-            break
-    body = "\n".join(lines[start:]).lstrip("\n")
-    if len(body) < 1000:
-        return ""
-    return "# " + title + "\n\n" + body
+        print("  jina սխալ՝", type(e).__name__)
+    time.sleep(1)
+    return "", False
+
+def _via_proxy(sess, url):
+    q = quote(url, safe="")
+    for p in PROXIES:
+        try:
+            r = sess.get(p + q, headers={"User-Agent": UA}, timeout=30)
+            print("  պրոքսի՝ %s, %s նշան" % (r.status_code, len(r.text or "")))
+            if r.status_code == 200 and not is_blocked(r.text):
+                return r.text
+        except Exception as e:
+            print("  պրոքսի սխալ՝", type(e).__name__)
+    return ""
 
 def jina(sess, url, extra=None):
-    want_html = bool(extra and extra.get("x-respond-with") == "html")
-    text = _browser_get(url, want_html)
-    if text:
-        return text
-    text = _jina_get(url, want_html)
-    if text:
-        print("  բերված է պահուստով (jina):", url[:70])
-        return text
-    time.sleep(3)
-    return ""
+    html_mode = bool(extra and str(extra.get("x-respond-with", "")).lower() == "html")
+    raw, from_jina = "", False
+
+    raw = _direct(sess, url)
+    if not raw:
+        raw, from_jina = _via_jina(sess, url, extra)
+    if not raw:
+        raw = _via_proxy(sess, url)
+    if not raw:
+        print("  ընթերցումը չհաջողվեց՝", url)
+        return ""
+
+    if html_mode or from_jina:
+        return raw
+    return to_md(raw, url)
