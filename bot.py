@@ -7,6 +7,7 @@ list.am -> Telegram («Барахолка Երևան»).
 (list.am грузит её скриптом) берём браузером: в workflow уже стоит playwright
 с chromium. Если браузер не справился — добираем jina/прямым входом.
 Публикация не зависит от страницы объявления: пост уходит и без неё.
+Латиница не переводится и не выбрасывается — публикуется как есть.
 """
 import os
 import re
@@ -21,7 +22,7 @@ TOKEN    = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 STATE       = "state.json"
-INTERVAL = 10 * 60
+INTERVAL    = 10 * 60     # пауза между публикациями, сек
 PUBLISH_MAX = 3           # сколько публикаций за один запуск (1 = как было)
 QUEUE_MAX   = 250         # максимум объявлений в очереди
 FRESH_H     = 24          # сколько часов объявление считается свежим
@@ -76,6 +77,7 @@ def plain(h):
     return " ".join(htmllib.unescape(re.sub(r"<[^>]+>", " ", h)).split())
 
 def script(s):
+    """hy — армянский, ru — кириллица, lat — латиница, none — ни одного."""
     s = s or ""
     if HY_RE.search(s):
         return "hy"
@@ -298,7 +300,7 @@ def item_extra(sess, iid):
 # ---------- текст ----------
 
 def translate(sess, text):
-    """Перевод не обязателен: не вышло — публикуем как есть."""
+    """Переводим только армянский. Не вышло — публикуем как есть."""
     text = (text or "").strip()
     if not text or script(text) != "hy":
         return text
@@ -436,7 +438,7 @@ def main():
         fresh_cards.update(fresh)
         time.sleep(3)
 
-    # 2. новое — в очередь (латиница не берётся)
+    # 2. новое — в очередь (латиница тоже берётся, просто без перевода)
     known = {e["id"] for e in st["queue"]}
     added, latin = 0, 0
     for iid, c in fresh_cards.items():
@@ -445,11 +447,10 @@ def main():
         st["seen"].append(iid)
         if script(c["title"]) == "lat":
             latin += 1
-            print(f"    латиница, в очередь не идёт: {iid} «{c['title'][:60]}»")
-            continue
+            print(f"    латиница, пойдёт как есть: {iid} «{c['title'][:60]}»")
         st["queue"].append(c)
         added += 1
-    print(f"новых в очередь: {added}, отброшено латиницы: {latin}")
+    print(f"новых в очередь: {added}, из них латиницей: {latin}")
     st["seen"] = st["seen"][-100000:]
     while len(st["queue"]) > QUEUE_MAX:
         st["queue"].pop(0)
@@ -468,9 +469,6 @@ def main():
             tried += 1
             e = st["queue"].pop(0)
             if e["id"] in st["published"]:
-                continue
-            if script(e["title"]) == "lat":
-                print("  латиница, из очереди убрано:", e["id"])
                 continue
 
             extra = {"photos": [], "desc": "", "title": ""}
@@ -501,7 +499,13 @@ def main():
                 st["queue"].append(e)
         print("за запуск опубликовано:", sent)
     else:
-        print("публиковать нечего или ещё не прошёл интервал")
+        if not st["queue"]:
+            print("публиковать нечего: очередь пуста")
+        else:
+            passed = int((now - st["last_publish"]) / 60)
+            left = int((INTERVAL - (now - st["last_publish"])) / 60) + 1
+            print(f"интервал: прошло {passed} мин из {INTERVAL // 60}, "
+                  f"следующая публикация примерно через {left} мин")
 
     if len(st["published"]) > 50000:
         keys = list(st["published"])[-50000:]
