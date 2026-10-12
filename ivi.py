@@ -2,28 +2,24 @@
 """
 ivi.am -> Telegram («Барахолка Երևան»).
 
-Как бот собирает объявление:
-  1. Обходит разделы (SECTIONS) и листает страницы раздела, пока идут новые
-     карточки; потолок — PER_CAT карточек на раздел.
-  2. С карточки берёт номер, ссылку, название, цену и строку «Обновлено».
-     Свежими считает обновлённые за последние FRESH_H часов.
-  3. Открывает страницу объявления и берёт оттуда галерею фотографий (до 10)
-     и описание.
-  4. Публикует по одному объявлению за запуск: название, цена, место,
-     описание и кнопка «Связаться».
+Порядок работы одного запуска:
+  1. Публикуем из уже собранной очереди — один пост, быстро.
+     Пост выходит, даже если сбор потом не успеет.
+  2. Добираем новые объявления, но не дольше MAX_SECONDS.
+  3. Состояние сохраняется после каждой ступени.
 
-Один id может выйти снова: если продавец обновил объявление позже, чем оно
-выходило в группе, оно публикуется заново. Сравнивается время обновления
-с временем нашей публикации, а не один только id.
+Настройки сбора подобраны под 25-минутный потолок GitHub Actions: разделам
+хватает MAX_PAGES страниц, потому что обновлённое за неделю всегда лежит на
+первых двух.
+
+Чтение идёт прямым запросом первым (list.am отвечает ему быстро), а Jina и
+открытые прокси остаются запасными: по одной попытке, без повторов.
 
 Фотографии берём только из папки самого объявления (/files/images/items/):
 картинки меню, баннеров и рекламных плашек не публикуем. Закрытые телефоны
-вида «(0x xxx xxxx)» вырезаем из текста: они бесполезны покупателю. Подписи
-кнопок сайта («Добавить в избранное») заголовком не становятся.
-
-Заголовок и описание переводим на русский (цепочка в fetcher.py); не вышло —
-публикуем оригинал. Армянское слово латиницей («vacharum em heraxos») не
-публикуем, берём следующее. Без фото объявление пропускаем.
+вида «(0x xxx xxxx)» вырезаем из текста. Подписи кнопок сайта заголовком не
+становятся. Заголовок и описание переводим на русский, не вышло — публикуем
+оригинал. Без фото объявление пропускаем.
 
 Знаки «<» и «>» в разборе страниц набраны кодом символа: в переписке такие
 сочетания иногда съедаются, и регэксп остаётся пустым.
@@ -52,7 +48,8 @@ PUBLISH_MAX = 1          # публикаций за один запуск
 QUEUE_MAX   = 2000       # предел очереди
 FRESH_H     = 168        # сколько часов объявление считается свежим (7 суток)
 PER_CAT     = 2000       # потолок карточек на раздел
-MAX_PAGES   = 10         # сколько страниц раздела листать
+MAX_PAGES   = 2          # сколько страниц раздела листать
+MAX_SECONDS = 15 * 60    # сколько секунд отдаём сбору, остальное — запас под потолок
 SAMPLE      = 3          # сколько карточек печатать в лог для проверки
 TEST        = False      # True -> ничего не отправлять, только показать разбор в логе
 
@@ -85,6 +82,10 @@ HDRS = {
                    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
     "Accept-Language": "ru,hy;q=0.9,en;q=0.8",
 }
+
+# страница защиты вместо данных
+BLOCKED = ("just a moment", "performing security verification", "checking your browser",
+           "enable javascript", "captcha", "are you a human")
 
 LINK_RE  = re.compile(r"/ru/item/([a-z0-9][a-z0-9\-]*?)-(\d{1,12})\.html", re.I)
 IMG_RE   = re.compile(r'(?:src|data-src|data-original|data-lazy)="([^"]+\.(?:jpg|jpeg|png|webp))"', re.I)
@@ -119,26 +120,45 @@ BAD_IMG = ("logo", "avatar", "icon", "sprite", "social", "flag", "banner",
 
 # ---------- сеть ----------
 
+def good(text):
+    """Страница пригодна: не защита и не пустышка."""
+    if not text or len(text) < 1500:
+        return False
+    low = text.lower()
+    return not any(b in low for b in BLOCKED)
+
 def fetch(sess, url):
-    """Прямой запрос, при отказе — открытый прокси. Сайт защиты не имеет."""
-    for attempt in range(2):
-        try:
-            r = sess.get(url, headers=HDRS, timeout=40)
-            if r.status_code == 200 and len(r.text) > 1500:
-                return r.text
-            print(f"  прямой {r.status_code}, {len(r.text)} знаков")
-        except Exception as e:
-            print(f"  ошибка {type(e).__name__}: {e}")
-        time.sleep(2)
+    """Прямой запрос первым, дальше Jina, дальше открытые прокси. По одной попытке."""
     try:
-        r = sess.get("https://api.allorigins.win/raw",
-                     params={"url": url}, headers=HDRS, timeout=60)
-        if r.status_code == 200 and len(r.text) > 1500:
-            print("  через прокси")
+        r = sess.get(url, headers=HDRS, timeout=25)
+        if r.status_code == 200 and good(r.text):
             return r.text
-        print(f"  прокси {r.status_code}, {len(r.text)} знаков")
+        print(f"  прямой {r.status_code}, {len(r.text)} знаков")
     except Exception as e:
-        print(f"  прокси ошибка: {type(e).__name__}: {e}")
+        print(f"  прямой сбой {type(e).__name__}")
+
+    try:
+        h = dict(HDRS)
+        h["x-engine"] = "browser"
+        r = sess.get("https://r.jina.ai/" + url, headers=h, timeout=40)
+        if r.status_code == 200 and good(r.text):
+            print("  jina")
+            return r.text
+        print(f"  jina {r.status_code}, {len(r.text)} знаков")
+    except Exception as e:
+        print(f"  jina сбой {type(e).__name__}")
+
+    for p in ("https://api.allorigins.win/raw", "https://api.codetabs.com/v1/proxy"):
+        try:
+            r = sess.get(p, params={"url": url}, headers=HDRS, timeout=40)
+            if r.status_code == 200 and good(r.text):
+                print("  прокси")
+                return r.text
+            print(f"  прокси {r.status_code}")
+        except Exception as e:
+            print(f"  прокси сбой {type(e).__name__}")
+
+    print("  чтение не удалось:", url)
     return ""
 
 def plain(h):
@@ -157,7 +177,7 @@ def find_price(txt):
     return " ".join(m.group(1).split()) + " " + m.group(2)
 
 def gallery(h, only_items=False):
-    """Фотографии объявления по порядку. only_items — только папка самого объявления."""
+    """Фото объявления по порядку. only_items — только папка самого объявления."""
     out = []
     for m in IMG_RE.finditer(h or ""):
         u = htmllib.unescape(m.group(1))
@@ -428,6 +448,9 @@ def load_st():
             print("state-ivi.json не читается:", e)
     return {}
 
+def save_st(st):
+    json.dump(st, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
+
 def norm_queue(st):
     """Очередь хранится словарями; старый формат [id, url, ts] тоже принимаем."""
     q = []
@@ -439,10 +462,13 @@ def norm_queue(st):
                       "title": "", "price": ""})
     st["queue"] = q
 
-def collect(sess, slug, st):
-    """Все карточки раздела, страница за страницей, пока идут новые."""
+def collect(sess, slug, st, deadline):
+    """Карточки раздела, страница за страницей, пока идут новые и есть время."""
     seen = {}
     for page in range(1, MAX_PAGES + 1):
+        if time.time() > deadline:
+            print("  сбор: время вышло")
+            break
         url = f"{BASE}/ru/search/{slug}/" if page == 1 else f"{BASE}/ru/search/{slug}/?page={page}"
         h = fetch(sess, url)
         if not h:
@@ -459,6 +485,57 @@ def collect(sess, slug, st):
         time.sleep(1)
     return seen
 
+def publish_one(sess, st, e, now):
+    """Одна попытка публикации. 'ok' | 'skip' | 'drop' | 'fail'."""
+    iid, url = e["id"], e["url"]
+    prev = st["published"].get(iid)
+    if prev and prev >= int(e.get("ts") or 0):
+        return "skip"                  # выходило и с тех пор не обновлялось
+    d = None
+    try:
+        d = item_data(sess, url, iid)
+    except Exception as ex:
+        print("ошибка разбора:", ex)
+    if not d:
+        print("  страница не открылась, пропускаем:", iid)
+        return "drop"
+    if not d["photos"]:
+        print("  без фото, пропускаем:", iid)
+        return "drop"
+    cap = caption(sess, e, d)
+    if not cap:
+        print("  без заголовка (латиницей армянский или пусто), пропускаем:", iid)
+        return "drop"
+    if send(sess, d, cap):
+        st["published"][iid] = int(e.get("ts") or now)
+        st["last_publish"] = time.time()
+        led_add(SITE, iid, now)
+        print("опубликовано:", iid, f"фото {len(d['photos'])}")
+        return "ok"
+    return "fail"
+
+def publish_phase(sess, st, now, limit=PUBLISH_MAX):
+    """Публикуем из очереди: не больше limit постов, не больше трёх попыток."""
+    done, tried = 0, 0
+    while st["queue"] and done < limit and tried < 3:
+        if not TEST and now - st["last_publish"] < INTERVAL:
+            print("ждём интервал между публикациями")
+            break
+        tried += 1
+        e = st["queue"].pop(0)
+        res = publish_one(sess, st, e, now)
+        if res == "ok":
+            done += 1
+        elif res == "fail":
+            iid = e["id"]
+            st["failed"][iid] = st["failed"].get(iid, 0) + 1
+            if st["failed"][iid] < 2:
+                st["queue"].append(e)
+                print("  вернём в конец очереди:", iid)
+            else:
+                print("  брошен:", iid)
+    return done
+
 def main():
     if not TOKEN or not CHAT_ID:
         print("нет TELEGRAM_TOKEN / TELEGRAM_CHAT_ID")
@@ -472,10 +549,23 @@ def main():
 
     sess = requests.Session()
     now = time.time()
+    deadline = now + MAX_SECONDS
 
-    # 1. все объявления, обновлённые за последнюю неделю
+    # 1. публикация из уже собранной очереди — до всякого сбора
+    done = publish_phase(sess, st, now, PUBLISH_MAX)
+    save_st(st)
+
+    if TEST:
+        for e in st["queue"][:3]:
+            print("---", e["url"])
+        return done
+
+    # 2. сбор новых, пока хватает времени
     for slug, name in SECTIONS.items():
-        cards = collect(sess, slug, st)
+        if time.time() > deadline:
+            print("сбор остановлен: время вышло")
+            break
+        cards = collect(sess, slug, st, deadline)
         fresh = [c for c in cards.values() if is_fresh(c["ts"])]
         print(f"[{slug}] {name}: карточек {len(cards)}, свежих за {FRESH_H}ч {len(fresh)}")
         for c in list(cards.values())[:SAMPLE]:
@@ -495,60 +585,17 @@ def main():
             st["queue"].append({"id": c["id"], "url": c["url"], "ts": ts,
                                 "title": c["title"], "price": c["price"]})
         time.sleep(1)
+    save_st(st)
 
-    # 2. старое выкидываем, хвост очереди ограничиваем
+    # 3. старое выкидываем, хвост очереди ограничиваем
     far = time.time() - FRESH_H * 3600
     st["queue"] = [e for e in st["queue"] if e.get("ts", 0) >= far]
     while len(st["queue"]) > QUEUE_MAX:
         st["queue"].pop(0)
-    print("в очереди:", len(st["queue"]))
 
-    if TEST:
-        for e in st["queue"][:3]:
-            print("---", e["url"])
-        return 0
-
-    # 3. публикация — ровно один пост за запуск
-    done, tried = 0, 0
-    while st["queue"] and done < PUBLISH_MAX and tried < PUBLISH_MAX * 3:
-        if not TEST and now - st["last_publish"] < INTERVAL:
-            print("ждём интервал между публикациями")
-            break
-        tried += 1
-        e = st["queue"].pop(0)
-        iid, url = e["id"], e["url"]
-        prev = st["published"].get(iid)
-        if prev and prev >= int(e.get("ts") or 0):
-            continue                      # уже выходило, обновления не было
-        d = None
-        try:
-            d = item_data(sess, url, iid)
-        except Exception as ex:
-            print("ошибка разбора:", ex)
-        if not d:
-            print("  страница не открылась, пропускаем:", iid)
-            continue
-        if not d["photos"]:
-            print("  без фото, пропускаем:", iid)
-            continue
-        cap = caption(sess, e, d)
-        if not cap:
-            print("  без заголовка (латиницей армянский или пусто), пропускаем:", iid)
-            continue
-        ok = bool(send(sess, d, cap))
-        if ok:
-            st["published"][iid] = int(e.get("ts") or now)
-            st["last_publish"] = now
-            led_add(SITE, iid, now)
-            done += 1
-            print("опубликовано:", iid, f"фото {len(d['photos'])}")
-        else:
-            st["failed"][iid] = st["failed"].get(iid, 0) + 1
-            if st["failed"][iid] < 2:
-                st["queue"].append(e)
-                print("  вернём в конец очереди:", iid)
-            else:
-                print("  брошен:", iid)
+    # 4. если очередь была пуста и только что наполнилась — публикуем
+    if done == 0 and st["queue"]:
+        done += publish_phase(sess, st, time.time(), 1)
 
     if len(st["published"]) > 50000:
         keep = list(st["published"])[-20000:]
@@ -556,7 +603,7 @@ def main():
     if len(st["failed"]) > 5000:
         st["failed"] = {}
 
-    json.dump(st, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
+    save_st(st)
     today = time.strftime("%d.%m.%Y", time.gmtime(time.time() + 4 * 3600))
     n_today = sum(1 for v in st["published"].values()
                   if time.strftime("%d.%m.%Y", time.gmtime(int(v) + 4 * 3600)) == today)
