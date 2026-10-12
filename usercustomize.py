@@ -1,26 +1,44 @@
 # -*- coding: utf-8 -*-
 """
 Этот файл бот загружает первым (см. bot.yml), до остальной работы.
-Задача одна: в альбоме не должно быть одного и того же снимка дважды.
+Две задачи.
 
-list.am отдаёт одну фотографию в разных размерах и форматах, бот собирает
-галерею по имени файла и берёт обе. Здесь альбом пересобирается по номеру
-фотографии: повтор убирается, из вариантов остаётся полный (папка f).
+1. Ключ Jina. Читалка r.jina.ai в браузерном режиме открывает страницы,
+   которые без ключа отдают проверку защиты. Ключ лежит в секрете JINA_KEY
+   и подставляется в каждый запрос к r.jina.ai.
 
-Если после этого остаётся один снимок, альбом отправлять нельзя — Telegram
-принимает альбом от двух фото. Тогда снимок уходит обычным сообщением,
-а боту возвращается ответ об успехе: он продолжает как обычно и добавляет
-«Связаться с продавцом» и кнопку.
+2. Альбом без повторов. list.am отдаёт одну фотографию в разных размерах,
+   бот собирает галерею по имени файла и берёт обе. Здесь альбом
+   пересобирается по номеру фотографии: повтор убирается, из вариантов
+   остаётся полный (папка f). Если остаётся один снимок, альбом отправлять
+   нельзя — Telegram принимает альбом от двух фото, поэтому снимок уходит
+   обычным сообщением, а боту возвращается ответ об успехе: он продолжает
+   как обычно и добавляет «Связаться с продавцом» и кнопку.
 
 Всё обёрнуто в try: не вышло — запрос уходит как есть.
 """
 import json
+import os
 import re
 
 try:
     import requests
 except Exception:
     requests = None
+
+JINA = "https://r.jina.ai/"
+KEY = os.environ.get("JINA_KEY", "")
+
+# ---------- ключ Jina ----------
+
+def _with_key(url, headers):
+    if not KEY or not str(url).startswith(JINA):
+        return headers
+    h = dict(headers or {})
+    h.setdefault("Authorization", "Bearer " + KEY)
+    return h
+
+# ---------- альбом без повторов ----------
 
 def _key(u):
     """Номер фотографии: любой из .../f/220/99993220.webp и его вариантов -> 99993220"""
@@ -74,7 +92,6 @@ class _Answer(object):
         return json.loads(self.text)
 
 def _one_photo(sess, old, url, data, one, timeout):
-    """Один снимок вместо альбома: обычное фото, а боту — ответ об успехе."""
     place = url.replace("sendMediaGroup", "sendPhoto")
     payload = {"chat_id": (data or {}).get("chat_id"),
                "photo": one.get("media"),
@@ -96,7 +113,15 @@ def _one_photo(sess, old, url, data, one, timeout):
 def _patch():
     if requests is None:
         return
-    old = requests.Session.post
+    old_get = requests.Session.get
+    old_post = requests.Session.post
+
+    def get(self, url, **kw):
+        try:
+            kw["headers"] = _with_key(url, kw.get("headers"))
+        except Exception:
+            pass
+        return old_get(self, url, **kw)
 
     def post(self, url, data=None, json=None, **kw):
         if url and "sendMediaGroup" in str(url):
@@ -107,15 +132,17 @@ def _patch():
                     print("  альбом: фото", len(items), "->", _names(items))
                     fixed = _clean(items)
                     if len(fixed) == 1:
-                        return _one_photo(self, old, url, data, fixed[0],
+                        return _one_photo(self, old_post, url, data, fixed[0],
                                           kw.get("timeout", 60))
                     if len(fixed) != len(items):
                         print("  альбом: убрано повторов", len(items) - len(fixed))
                         data = dict(data, media=json.dumps(fixed, ensure_ascii=False))
             except Exception as e:
                 print("  альбом: правка не вышла:", type(e).__name__)
-        return old(self, url, data=data, json=json, **kw)
+        return old_post(self, url, data=data, json=json, **kw)
 
+    requests.Session.get = get
     requests.Session.post = post
 
 _patch()
+print("подготовка: ключ Jina", "есть" if KEY else "нет")
