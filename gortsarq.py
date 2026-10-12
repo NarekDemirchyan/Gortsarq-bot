@@ -7,13 +7,14 @@ gortsarq.am -> Telegram («Барахолка Երևան»).
   2. Добираем объявления за последнюю неделю, но не дольше MAX_SECONDS.
   3. Состояние сохраняется после каждой ступени.
 
-Разделам хватает MAX_PAGES страниц: объявления за неделю всегда лежат на
-первых двух. Страница объявления читается один раз — markdown хватает и для
-заголовка, и для цены, и для фото.
+Раздел листается, пока на странице есть свежее за FRESH_DAYS суток и пока идут
+новые ссылки. MAX_PAGES — предохранитель, обычно до него не доходит: в списке
+сначала самые свежие, поэтому страница без свежих означает, что дальше старое.
 
-Чтение идёт прямым запросом первым, дальше Jina и открытые прокси — по одной
-попытке. HTML переводим в markdown через fetcher.to_md, под который написаны
-парсеры.
+Страница объявления читается один раз — markdown хватает и для заголовка, и для
+цены, и для фото. Чтение идёт прямым запросом первым, дальше Jina и открытые
+прокси — по одной попытке. HTML переводим в markdown через fetcher.to_md, под
+который написаны парсеры.
 
 Один id может выйти снова: если продавец обновил объявление позже, чем оно
 выходило в группе, оно публикуется заново. У gortsarq на карточке видна только
@@ -22,6 +23,7 @@ gortsarq.am -> Telegram («Барахолка Երևան»).
 Закрытые телефоны вида «(0x xxx xxxx)» вырезаем. Заголовок и описание переводим
 на русский, не вышло — публикуем оригинал. Инфинитив вроде «Одеваться» заголовком
 не ставим. Армянское слово латиницей не публикуем. Без фото объявление пропускаем.
+Очередь перед публикацией перемешивается, чтобы разделы шли вперемешку.
 
 Знаки «<» и «>» в разборе страниц набраны кодом символа.
 """
@@ -29,6 +31,7 @@ import os
 import re
 import json
 import time
+import random
 
 import requests
 
@@ -51,7 +54,7 @@ INTERVAL    = 0              # ритм задаёт расписание (run.p
 QUEUE_MAX   = 2000           # максимум объявлений в очереди
 FRESH_DAYS  = 7              # берём объявления за последнюю неделю
 PER_CAT     = 2000           # потолок ссылок на раздел
-MAX_PAGES   = 2              # сколько страниц раздела листать
+MAX_PAGES   = 20             # предохранитель по страницам раздела
 MAX_SECONDS = 15 * 60        # сколько секунд отдаём сбору, остальное — запас
 RESET_ONCE  = False          # однократный сброс очереди (уже сделан)
 TEST        = False
@@ -150,7 +153,8 @@ def fetch(sess, url):
 # ---------- разбор ----------
 
 def get_items(sess, deadline):
-    """Ссылки разделов: страница за страницей, пока идут новые и есть время."""
+    """Ссылки разделов, пока идут новые и пока на странице есть свежее."""
+    ok_dates = last_days(FRESH_DAYS)
     found = {}
     for cat in CATS:
         per_cat = 0
@@ -162,21 +166,26 @@ def get_items(sess, deadline):
             if not md:
                 break
             n = 0
+            fresh = 0
             for m in ITEM_RE.finditer(md):
                 iid = m.group(1)
                 path = m.group(0)[len(BASE):].split("]")[0].split(")")[0]
                 tail = md[m.end():m.end() + 300]
                 d = DATE_RE.search(tail)
                 date = d.group(0) if d else ""
+                if date and date in ok_dates:
+                    fresh += 1
                 if iid not in found:
                     found[iid] = {"path": path, "date": date}
                     n += 1
                 elif date and not found[iid]["date"]:
                     found[iid]["date"] = date
             per_cat += n
-            print(f"[{cat}] стр.{page}: новых {n}")
+            print(f"[{cat}] стр.{page}: новых {n}, свежих {fresh}")
             if n == 0 or per_cat >= PER_CAT:
                 break
+            if fresh == 0 and page > 1:
+                break                  # дальше только старое
             time.sleep(1)
     return found
 
@@ -300,171 +309,4 @@ def send(sess, d, caption):
     if photos:
         payload["photo"] = photos[0]
         payload["caption"] = caption
-        method = "sendPhoto"
-    else:
-        payload["text"] = caption
-        method = "sendMessage"
-
-    r = sess.post(f"https://api.telegram.org/bot{TOKEN}/{method}",
-                  data=payload, timeout=40)
-    print("telegram:", r.status_code, r.text[:200])
-    return bool(r.ok)
-
-# ---------- состояние ----------
-
-def load():
-    if os.path.exists(STATE):
-        try:
-            return json.load(open(STATE, encoding="utf-8"))
-        except Exception as e:
-            print("state-gortsarq.json не читается:", e)
-    return {"queue": [], "last_publish": 0, "published": {}, "failed": {}}
-
-def save(st):
-    json.dump(st, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
-
-def norm_queue(st):
-    """Очередь — словари {id, path, date}; старые строки-пути тоже принимаем."""
-    q = []
-    for e in st.get("queue", []):
-        if isinstance(e, dict) and e.get("path"):
-            p = str(e["path"]).split("]")[0].split(")")[0]
-            iid = str(e.get("id") or "")
-            if not iid:
-                m = ITEM_ID_RE.search(p)
-                iid = m.group(1) if m else p
-            q.append({"id": iid, "path": p, "date": e.get("date", "")})
-        elif isinstance(e, str):
-            p = e.split("]")[0].split(")")[0]
-            m = ITEM_ID_RE.search(p)
-            q.append({"id": m.group(1) if m else p, "path": p, "date": ""})
-    st["queue"] = q
-
-def norm_published(st):
-    """Старые отметки времени превращаем в дату обновления (ДД.ММ.ГГГГ)."""
-    pub = st.get("published") or {}
-    for k, v in list(pub.items()):
-        if isinstance(v, (int, float)):
-            pub[k] = time.strftime("%d.%m.%Y", time.gmtime(v + 4 * 3600))
-    st["published"] = pub
-
-# ---------- публикация ----------
-
-def publish_one(sess, st, e, now):
-    """Одна попытка публикации. 'ok' | 'skip' | 'drop' | 'fail'."""
-    path = e["path"]
-    iid = e.get("id") or ""
-    if st["published"].get(path) == e.get("date"):
-        return "skip"                  # выходило с этой же датой обновления
-    d = None
-    try:
-        d = item_data(sess, path)
-    except Exception as ex:
-        print("ошибка разбора:", ex)
-    if not d:
-        print("  страница не открылась, пропускаем:", iid)
-        return "drop"
-    if not d["photos"]:
-        print("  без фото, пропускаем:", iid)
-        return "drop"
-    cap = make_caption(sess, d)
-    if not cap:
-        print("  без заголовка (латиницей армянский или пусто), пропускаем:", iid)
-        return "drop"
-    if send(sess, d, cap):
-        st["last_publish"] = now
-        st["published"][path] = e.get("date") or today_str()
-        led_add(SITE, iid, now)
-        print(f"опубликовано: {iid} ({path}) фото {len(d['photos'])}")
-        return "ok"
-    return "fail"
-
-def publish_phase(sess, st, now, limit=1):
-    """Публикуем из очереди: не больше limit постов, не больше трёх попыток."""
-    done, tried = 0, 0
-    while st["queue"] and done < limit and tried < 3:
-        if now - st["last_publish"] < INTERVAL:
-            print("ждём интервал между публикациями")
-            break
-        tried += 1
-        e = st["queue"].pop(0)
-        res = publish_one(sess, st, e, now)
-        if res == "ok":
-            done += 1
-        elif res == "fail":
-            path = e["path"]
-            st["failed"][path] = st["failed"].get(path, 0) + 1
-            if st["failed"][path] < 2:
-                st["queue"].append(e)
-                print(f"  вернём в конец очереди: {path}")
-            else:
-                print(f"  брошен {path}: не удалось 2 раза")
-    return done
-
-def main():
-    st = load()
-    st.setdefault("failed", {})
-    st.setdefault("published", {})
-    st.setdefault("last_publish", 0)
-    norm_queue(st)
-    norm_published(st)
-    sess = requests.Session()
-    now = time.time()
-    deadline = now + MAX_SECONDS
-
-    if RESET_ONCE and not st.get("reset_done2"):
-        st["queue"] = []
-        st["failed"] = {}
-        st["reset_done2"] = True
-        print("очистка: очередь сброшена")
-
-    # 1. публикация из уже собранной очереди — до всякого сбора
-    done = publish_phase(sess, st, now, 1)
-    save(st)
-
-    if TEST:
-        for e in st["queue"][:1]:
-            d = item_data(sess, e["path"])
-            if d:
-                print("фото:", len(d["photos"]), "заголовок:", d["title"])
-        return done
-
-    # 2. сбор объявлений за неделю, пока хватает времени
-    items = get_items(sess, deadline)
-    print("всего найдено:", len(items))
-
-    ok_dates = last_days(FRESH_DAYS)
-    fresh = []
-    for iid, it in items.items():
-        if not it["date"]:
-            it["date"] = today_str()      # без даты на карточке считаем сегодняшним
-        if it["date"] not in ok_dates:
-            continue                      # старше недели — не берём вовсе
-        if st["published"].get(it["path"]) == it["date"]:
-            continue                      # выходило с этой же датой обновления
-        fresh.append({"id": iid, "path": it["path"], "date": it["date"]})
-
-    if fresh:
-        st["queue"].extend(fresh)
-        print("новых в очередь:", len(fresh))
-    while len(st["queue"]) > QUEUE_MAX:
-        st["queue"].pop(0)
-    print("свежих за неделю:", len(fresh), "| очередь:", len(st["queue"]))
-    save(st)
-
-    # 3. если очередь была пуста и только что наполнилась — публикуем
-    if done == 0 and st["queue"]:
-        done += publish_phase(sess, st, time.time(), 1)
-
-    if len(st["published"]) > 50000:
-        keys = list(st["published"])[-20000:]
-        st["published"] = {k: st["published"][k] for k in keys}
-
-    save(st)
-    today = today_str()
-    n_today = sum(1 for v in st["published"].values() if str(v) == today)
-    print(f"готово, публикаций за запуск: {done} | сегодня всего: {n_today}")
-    return done
-
-if __name__ == "__main__":
-    main()
+        method =…
