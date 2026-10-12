@@ -12,16 +12,16 @@ gortsarq.am -> Telegram («Барахолка Երևան»).
 заголовка, и для цены, и для фото.
 
 Чтение идёт прямым запросом первым, дальше Jina и открытые прокси — по одной
-попытке. HTML переводим в тот же markdown, под который написаны парсеры
-(fetcher.to_md).
+попытке. HTML переводим в markdown через fetcher.to_md, под который написаны
+парсеры.
 
 Один id может выйти снова: если продавец обновил объявление позже, чем оно
 выходило в группе, оно публикуется заново. У gortsarq на карточке видна только
 дата, поэтому сравниваются даты, а не часы.
 
 Закрытые телефоны вида «(0x xxx xxxx)» вырезаем. Заголовок и описание переводим
-на русский, не вышло — публикуем оригинал. Армянское слово латиницей не
-публикуем. Без фото объявление пропускаем.
+на русский, не вышло — публикуем оригинал. Инфинитив вроде «Одеваться» заголовком
+не ставим. Армянское слово латиницей не публикуем. Без фото объявление пропускаем.
 
 Знаки «<» и «>» в разборе страниц набраны кодом символа.
 """
@@ -32,23 +32,29 @@ import time
 
 import requests
 
-from fetcher import translate, script, has_cyr, is_translit_hy, led_add, to_md
+from fetcher import translate, script, has_cyr, is_translit_hy, led_add
+
+try:
+    from fetcher import to_md
+except ImportError:
+    def to_md(html, url=""):
+        return html
 
 GT = chr(62)
 
 TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-SITE       = "gortsarq"
-STATE      = "state-gortsarq.json"
-INTERVAL   = 0              # ритм задаёт расписание (run.py)
-QUEUE_MAX  = 2000           # максимум объявлений в очереди
-FRESH_DAYS = 7              # берём объявления за последнюю неделю
-PER_CAT    = 2000           # потолок ссылок на раздел
-MAX_PAGES  = 2              # сколько страниц раздела листать
-MAX_SECONDS = 15 * 60       # сколько секунд отдаём сбору, остальное — запас
-RESET_ONCE = False          # однократный сброс очереди (уже сделан)
-TEST       = False
+SITE        = "gortsarq"
+STATE       = "state-gortsarq.json"
+INTERVAL    = 0              # ритм задаёт расписание (run.py)
+QUEUE_MAX   = 2000           # максимум объявлений в очереди
+FRESH_DAYS  = 7              # берём объявления за последнюю неделю
+PER_CAT     = 2000           # потолок ссылок на раздел
+MAX_PAGES   = 2              # сколько страниц раздела листать
+MAX_SECONDS = 15 * 60        # сколько секунд отдаём сбору, остальное — запас
+RESET_ONCE  = False          # однократный сброс очереди (уже сделан)
+TEST        = False
 
 BASE = "https://gortsarq.am"
 
@@ -225,11 +231,14 @@ def headline(sess, d):
     t = scrub(translate(sess, src).strip())
     if is_translit_hy(src) or is_translit_hy(t):
         return ""
-    if t and (has_cyr(t) or script(t) == "lat"):
+    # инфинитив вроде «Одеваться» заголовком не ставим
+    if t and not re.search(r"(?:ться|тись)$", t.lower()) and (has_cyr(t) or script(t) == "lat"):
         return " ".join(t.split())[:90]
     alt = scrub(translate(sess, d["desc"][:300]).strip())
     if has_cyr(alt) and len(alt.split()) >= 3:
-        return re.split(r"[.!?]\s", alt)[0].strip()[:90]
+        return " ".join(re.split(r"[.!?]\s", alt)[0].strip().split())[:90]
+    if t and (has_cyr(t) or script(t) == "lat"):
+        return " ".join(t.split())[:90]
     return " ".join((t or alt).split())[:90]
 
 def make_caption(sess, d):
@@ -285,7 +294,7 @@ def send(sess, d, caption):
         r2 = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
                        data=payload, timeout=40)
         print("telegram кнопка:", r2.status_code, r2.text[:200])
-        return bool(r.ok)
+        return bool(r.ok and r2.ok)
 
     payload = {"chat_id": CHAT_ID, "reply_markup": json.dumps(markup)}
     if photos:
