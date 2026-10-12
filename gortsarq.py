@@ -2,17 +2,27 @@
 """
 gortsarq.am -> Telegram («Барахолка Երևան»).
 
-Один запуск = один пост (ритм задаёт run.py). Берём объявления за последние
-сутки по дате на карточке (ДД.ММ.ГГГГ). Каждый id выходит один раз: он идёт
-и в state-gortsarq.json, и в общую тетрадь published.json.
+Как бот собирает объявление:
+  1. Обходит разделы (CATS) и листает страницы раздела, пока идут новые
+     карточки; потолок — PER_CAT ссылок на раздел.
+  2. Берёт объявления за последнюю неделю по дате на карточке
+     (ДД.ММ.ГГГГ).
+  3. Открывает страницу объявления и берёт оттуда фотографии (до 10),
+     заголовок, цену, место и описание.
+  4. Публикует по одному объявлению за запуск: название, цена, место,
+     описание и кнопка «Связаться».
 
-Чтение и перевод — из fetcher.py (три ступени чтения, цепочка переводчиков).
-Заголовок и описание переводим на русский, не вышло — публикуем оригинал.
-Армянское слово латиницей («vacharum em heraxos») не публикуем, берём
-следующее. Фото — до 10, без фото объявление пропускаем.
+Один id может выйти снова: если продавец обновил объявление позже, чем оно
+выходило в группе, оно публикуется заново. У gortsarq на карточке видна
+только дата, поэтому сравниваются даты, а не часы.
 
-Знаки «<» и «>» в разборе страниц набраны кодом символа (GT): в переписке такие
-сочетания иногда съедаются, и регэксп остаётся пустым.
+Чтение и перевод — из fetcher.py. Заголовок и описание переводим на русский,
+не вышло — публикуем оригинал. Армянское слово латиницей («vacharum em
+heraxos») не публикуем, берём следующее. Фото — до 10, без фото объявление
+пропускаем.
+
+Знаки «<» и «>» в разборе страниц набраны кодом символа (GT): в переписке
+такие сочетания иногда съедаются, и регэксп остаётся пустым.
 """
 import os
 import re
@@ -21,7 +31,7 @@ import time
 
 import requests
 
-from fetcher import jina, translate, script, has_cyr, is_translit_hy, led_has, led_add
+from fetcher import jina, translate, script, has_cyr, is_translit_hy, led_add
 
 GT = chr(62)
 
@@ -31,8 +41,10 @@ CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 SITE       = "gortsarq"
 STATE      = "state-gortsarq.json"
 INTERVAL   = 0              # ритм задаёт расписание (run.py)
-QUEUE_MAX  = 250            # максимум объявлений в очереди
-FRESH_DAYS = 1              # берём только объявления за последние сутки
+QUEUE_MAX  = 2000           # максимум объявлений в очереди
+FRESH_DAYS = 7              # берём объявления за последнюю неделю
+PER_CAT    = 2000           # потолок ссылок на раздел
+MAX_PAGES  = 5              # сколько страниц раздела листать
 RESET_ONCE = False          # однократный сброс очереди (уже сделан)
 TEST       = False
 
@@ -62,24 +74,35 @@ def last_days(n):
         out.add(time.strftime("%d.%m.%Y", time.gmtime(base - k * 24 * 3600)))
     return out
 
+def list_url(cat, page):
+    return f"{BASE}/ru/{cat}/" if page == 1 else f"{BASE}/ru/{cat}/?page={page}"
+
 def get_items(sess):
+    """Ссылки разделов: страница за страницей, пока идут новые."""
     found = {}
     for cat in CATS:
-        md = jina(sess, f"{BASE}/ru/{cat}/")
-        n = 0
-        for m in ITEM_RE.finditer(md):
-            iid = m.group(1)
-            path = m.group(0)[len("https://gortsarq.am"):]
-            tail = md[m.end():m.end() + 300]
-            d = DATE_RE.search(tail)
-            date = d.group(0) if d else ""
-            if iid not in found:
-                found[iid] = {"path": path, "date": date}
-                n += 1
-            elif date and not found[iid]["date"]:
-                found[iid]["date"] = date
-        print(f"[{cat}] ссылок: {n}")
-        time.sleep(3)
+        per_cat = 0
+        for page in range(1, MAX_PAGES + 1):
+            md = jina(sess, list_url(cat, page))
+            if not md:
+                break
+            n = 0
+            for m in ITEM_RE.finditer(md):
+                iid = m.group(1)
+                path = m.group(0)[len("https://gortsarq.am"):]
+                tail = md[m.end():m.end() + 300]
+                d = DATE_RE.search(tail)
+                date = d.group(0) if d else ""
+                if iid not in found:
+                    found[iid] = {"path": path, "date": date}
+                    n += 1
+                elif date and not found[iid]["date"]:
+                    found[iid]["date"] = date
+            per_cat += n
+            print(f"[{cat}] стр.{page}: новых {n}")
+            if n == 0 or per_cat >= PER_CAT:
+                break
+            time.sleep(3)
     return found
 
 def item_data(sess, path):
@@ -173,7 +196,7 @@ def send(sess, d, caption):
             r1 = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendPhoto",
                            data=payload, timeout=40)
             print("telegram fallback:", r1.status_code, r1.text[:200])
-            return r1.ok
+            return bool(r1.ok)
 
         mid = None
         try:
@@ -190,7 +213,7 @@ def send(sess, d, caption):
         r2 = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
                        data=payload, timeout=40)
         print("telegram кнопка:", r2.status_code, r2.text[:200])
-        return r.ok and r2.ok
+        return bool(r.ok)
 
     payload = {"chat_id": CHAT_ID, "reply_markup": json.dumps(markup)}
     if photos:
@@ -204,7 +227,7 @@ def send(sess, d, caption):
     r = sess.post(f"https://api.telegram.org/bot{TOKEN}/{method}",
                   data=payload, timeout=40)
     print("telegram:", r.status_code, r.text[:200])
-    return r.ok
+    return bool(r.ok)
 
 def load():
     if os.path.exists(STATE):
@@ -212,14 +235,13 @@ def load():
             return json.load(open(STATE, encoding="utf-8"))
         except Exception as e:
             print("state-gortsarq.json не читается:", e)
-    return {"seen": [], "queue": [], "last_publish": 0,
-            "published": {}, "failed": {}}
+    return {"queue": [], "last_publish": 0, "published": {}, "failed": {}}
 
 def save(st):
     json.dump(st, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
 
 def norm_queue(st):
-    """Очередь — словари {id, path}; старые строки-пути тоже принимаем."""
+    """Очередь — словари {id, path, date}; старые строки-пути тоже принимаем."""
     q = []
     for e in st.get("queue", []):
         if isinstance(e, dict) and e.get("path"):
@@ -227,27 +249,34 @@ def norm_queue(st):
             if not iid:
                 m = ITEM_ID_RE.search(e["path"])
                 iid = m.group(1) if m else e["path"]
-            q.append({"id": iid, "path": e["path"]})
+            q.append({"id": iid, "path": e["path"], "date": e.get("date", "")})
         elif isinstance(e, str):
             m = ITEM_ID_RE.search(e)
-            q.append({"id": m.group(1) if m else e, "path": e})
+            q.append({"id": m.group(1) if m else e, "path": e, "date": ""})
     st["queue"] = q
+
+def norm_published(st):
+    """Старые отметки времени превращаем в дату обновления (ДД.ММ.ГГГГ)."""
+    pub = st.get("published") or {}
+    for k, v in list(pub.items()):
+        if isinstance(v, (int, float)):
+            pub[k] = time.strftime("%d.%m.%Y", time.gmtime(v + 4 * 3600))
+    st["published"] = pub
 
 def main():
     st = load()
     st.setdefault("failed", {})
-    st.setdefault("seen", [])
     st.setdefault("published", {})
     st.setdefault("last_publish", 0)
     norm_queue(st)
+    norm_published(st)
     sess = requests.Session()
 
     if RESET_ONCE and not st.get("reset_done2"):
         st["queue"] = []
-        st["seen"] = []
         st["failed"] = {}
         st["reset_done2"] = True
-        print("очистка: очередь и список просмотренных сброшены")
+        print("очистка: очередь сброшена")
 
     items = get_items(sess)
     print("всего найдено:", len(items))
@@ -262,15 +291,11 @@ def main():
     ok_dates = last_days(FRESH_DAYS)
     fresh = []
     for iid, it in items.items():
-        if (iid in st["seen"] or iid in st["published"]
-                or it["path"] in st["published"] or led_has(SITE, iid)):
-            continue
-        st["seen"].append(iid)
         if it["date"] and it["date"] not in ok_dates:
-            continue                      # старше суток — не берём вовсе
-        fresh.append({"id": iid, "path": it["path"]})
-
-    st["seen"] = st["seen"][-20000:]
+            continue                      # старше недели — не берём вовсе
+        if st["published"].get(it["path"]) == it["date"]:
+            continue                      # выходило с этой же датой обновления
+        fresh.append({"id": iid, "path": it["path"], "date": it["date"]})
 
     if fresh:
         st["queue"].extend(fresh)
@@ -291,9 +316,10 @@ def main():
                 break
             e = st["queue"].pop(0)
             iid, path = e["id"], e["path"]
-            if iid in st["published"] or path in st["published"] or led_has(SITE, iid):
-                continue
+            if st["published"].get(path) == e.get("date"):
+                continue                  # уже выходило с этой же датой
             ok = False
+            d = None
             try:
                 d = item_data(sess, path)
                 if d and not d["photos"]:
@@ -310,7 +336,8 @@ def main():
 
             if ok:
                 st["last_publish"] = now
-                st["published"][path] = now
+                st["published"][path] = e.get("date") or time.strftime(
+                    "%d.%m.%Y", time.gmtime(now + 4 * 3600))
                 led_add(SITE, iid, now)
                 done += 1
                 print(f"опубликовано: {iid} ({path}) фото {len(d['photos'])}")
