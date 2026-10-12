@@ -3,16 +3,24 @@
 ivi.am -> Telegram («Барахолка Երևան»).
 
 Один запуск = один пост (ритм задаёт run.py). Публикуем объявления,
-обновлённые продавцом за последние 24 часа: «Сегодня 19:03», «Вчера 22:10»,
-«11.10.2026», «11 октября». Объявление 2023 года, обновлённое вчера, — свежее.
-Каждый id выходит один раз: он идёт и в state-ivi.json, и в общую тетрадь
-published.json.
+обновлённые продавцом за последнюю неделю (FRESH_H = 168): «Сегодня 19:03»,
+«Вчера 22:10», «11.10.2026», «11 октября». Объявление 2023 года,
+обновлённое вчера, — свежее.
+
+Один id может выйти снова: если продавец обновил объявление позже, чем оно
+выходило в группе, оно публикуется заново. Сравнивается не id, а время
+обновления с временем нашей публикации.
+
+Раздел смотрим до PER_CAT карточек — потолок 2000.
 
 Заголовок и описание переводим на русский (цепочка в fetcher.py); не вышло —
 публикуем оригинал. Армянское слово латиницей («vacharum em heraxos») не
 публикуем, берём следующее. Фото — до 10, без фото объявление пропускаем.
 Название, цена и место берутся из карточки раздела, фото — только этого
 объявления, описание — из блока после строки «N <id>».
+
+Знаки «<» и «>» в разборе страниц набраны кодом символа: в переписке такие
+сочетания иногда съедаются, и регэксп остаётся пустым.
 """
 import os
 import re
@@ -23,7 +31,10 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-from fetcher import translate, script, has_cyr, is_translit_hy, led_has, led_add
+from fetcher import translate, script, has_cyr, is_translit_hy, led_add
+
+LT = chr(60)
+GT = chr(62)
 
 TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -32,9 +43,9 @@ SITE        = "ivi"
 STATE       = "state-ivi.json"
 INTERVAL    = 0          # ритм задаёт расписание (run.py)
 PUBLISH_MAX = 1          # публикаций за один запуск
-QUEUE_MAX   = 300        # предел очереди
-FRESH_H     = 24         # сколько часов объявление считается свежим после обновления
-PER_CAT     = 60         # сколько карточек смотреть в разделе
+QUEUE_MAX   = 2000       # предел очереди
+FRESH_H     = 168        # сколько часов объявление считается свежим (7 суток)
+PER_CAT     = 2000       # потолок карточек в разделе
 SAMPLE      = 3          # сколько карточек печатать в лог для проверки
 TEST        = False      # True -> ничего не отправлять, только показать разбор в логе
 
@@ -112,7 +123,7 @@ def fetch(sess, url):
     return ""
 
 def plain(h):
-    return " ".join(htmllib.unescape(re.sub(r"<[^>]+>", " ", h)).split())
+    return " ".join(htmllib.unescape(re.sub(LT + "[^" + GT + "]+" + GT, " ", h)).split())
 
 # ---------- разбор ----------
 
@@ -123,7 +134,7 @@ def find_price(txt):
     return " ".join(m.group(1).split()) + " " + m.group(2)
 
 def clean_desc(text, limit=700):
-    parts = [p.strip(" |·—") for p in re.split(r"\s*\|\s*|<br\s*/?>", text or "")]
+    parts = [p.strip(" |·—") for p in re.split(r"\s*\|\s*|" + LT + r"br\s*/?" + GT, text or "")]
     keep = []
     for p in parts:
         if len(p) < 5:
@@ -236,7 +247,7 @@ def item_data(sess, url, iid):
     txt = plain(h)
 
     title = ""
-    m = re.search(r"<h1[^>]*>(.*?)</h1>", h, re.S)
+    m = re.search(LT + r"h1[^" + GT + r"]*" + GT + r"(.*?)" + LT + r"/h1" + GT, h, re.S)
     if m:
         title = plain(m.group(1))
 
@@ -246,7 +257,7 @@ def item_data(sess, url, iid):
     price = find_price(head_zone)
 
     place = ""
-    m = re.search(r"([А-Яа-яЁёA-Za-z][^|<>]{2,40}?)\s*\|\s*\d{2}\.\d{2}\.\d{4}", txt)
+    m = re.search(r"([А-Яа-яЁёA-Za-z][^|" + LT + GT + r"]{2,40}?)\s*\|\s*\d{2}\.\d{2}\.\d{4}", txt)
     if m:
         place = re.sub(r"\s+", " ", m.group(1)).strip(" ,")
 
@@ -286,7 +297,8 @@ def caption(sess, e, d):
         lines.append(place)
     if desc:
         lines.append(translate(sess, desc))
-    return "\n\n".join(x for x in lines if x)[:1024]
+    lines = [" ".join(x.split()) for x in lines if x]
+    return "\n\n".join(lines)[:1024]
 
 # ---------- Telegram ----------
 
@@ -324,7 +336,7 @@ def send(sess, d, cap):
         r2 = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
                        data=payload, timeout=40)
         print("telegram кнопка:", r2.status_code, r2.text[:200])
-        return r.ok
+        return bool(r.ok)
 
     payload = {"chat_id": CHAT_ID, "reply_markup": json.dumps(markup)}
     if photos:
@@ -337,7 +349,7 @@ def send(sess, d, cap):
     r = sess.post(f"https://api.telegram.org/bot{TOKEN}/{method}",
                   data=payload, timeout=40)
     print("telegram:", r.status_code, r.text[:300])
-    return r.ok
+    return bool(r.ok)
 
 # ---------- состояние ----------
 
@@ -366,7 +378,7 @@ def main():
         return 0
 
     st = load_st()
-    st.setdefault("published", {})   # id -> ts
+    st.setdefault("published", {})   # id -> время обновления объявления
     st.setdefault("failed", {})
     st.setdefault("last_publish", 0)
     norm_queue(st)
@@ -374,7 +386,7 @@ def main():
     sess = requests.Session()
     now = time.time()
 
-    # 1. все объявления, обновлённые за последние 24 часа
+    # 1. все объявления, обновлённые за последнюю неделю
     for slug, name in SECTIONS.items():
         h = fetch(sess, f"{BASE}/ru/search/{slug}/")
         cards = card_scan(h, slug, PER_CAT)
@@ -383,12 +395,18 @@ def main():
         for c in list(cards.values())[:SAMPLE]:
             print(f"    {c['id']}: «{c['title']}» {c['price']} "
                   f"обновлено «{c['updated_txt']}» свежее={is_fresh(c['ts'])}")
-        known = {e["id"] for e in st["queue"]}
+        in_queue = {e["id"]: e for e in st["queue"]}
         for c in fresh:
-            if (c["id"] in st["published"] or c["id"] in known
-                    or led_has(SITE, c["id"])):
-                continue
-            st["queue"].append({"id": c["id"], "url": c["url"], "ts": int(c["ts"]),
+            ts = int(c["ts"])
+            prev = st["published"].get(c["id"])
+            if prev and prev >= ts:
+                continue                  # выходило и с тех пор не обновлялось
+            if c["id"] in in_queue:
+                if in_queue[c["id"]].get("ts", 0) >= ts:
+                    continue              # уже стоит в очереди с тем же обновлением
+                in_queue[c["id"]].update(ts=ts, title=c["title"], price=c["price"])
+                continue                  # объявление обновили — очередь возьмёт его снова
+            st["queue"].append({"id": c["id"], "url": c["url"], "ts": ts,
                                 "title": c["title"], "price": c["price"]})
         time.sleep(1)
 
@@ -413,8 +431,9 @@ def main():
         tried += 1
         e = st["queue"].pop(0)
         iid, url = e["id"], e["url"]
-        if iid in st["published"] or led_has(SITE, iid):
-            continue
+        prev = st["published"].get(iid)
+        if prev and prev >= int(e.get("ts") or 0):
+            continue                      # уже выходило, обновления не было
         d = None
         try:
             d = item_data(sess, url, iid)
@@ -432,7 +451,7 @@ def main():
             continue
         ok = bool(send(sess, d, cap))
         if ok:
-            st["published"][iid] = int(now)
+            st["published"][iid] = int(e.get("ts") or now)
             st["last_publish"] = now
             led_add(SITE, iid, now)
             done += 1
