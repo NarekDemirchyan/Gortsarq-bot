@@ -2,11 +2,11 @@
 """
 list.am -> Telegram («Барахолка Երևան»).
 
-Все поля карточки (заголовок, цена, место, фото, время) берутся из одного окна
-одной карточки — соседние объявления не подмешиваются. Публикация не зависит от
-страницы объявления: если она не читается (403 / защита), пост всё равно уходит
-с данными и фото из карточки. Страница объявления — дополнение: заголовок,
-галерея (до 10 фото) и описание.
+Поля карточки (заголовок, цена, место, фото, время) читаются из одного окна
+одной карточки — соседние объявления не подмешиваются. Галерею объявления
+(list.am грузит её скриптом) берём браузером: в workflow уже стоит playwright
+с chromium. Если браузер не справился — добираем jina/прямым входом.
+Публикация не зависит от страницы объявления: пост уходит и без неё.
 """
 import os
 import re
@@ -21,7 +21,7 @@ TOKEN    = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 STATE       = "state.json"
-INTERVAL = 10 * 60
+INTERVAL    = 10 * 60     # пауза между публикациями, сек
 PUBLISH_MAX = 3           # сколько публикаций за один запуск (1 = как было)
 QUEUE_MAX   = 250         # максимум объявлений в очереди
 FRESH_H     = 24          # сколько часов объявление считается свежим
@@ -51,9 +51,9 @@ PRICE_RE = re.compile(r"\d[\d\s,]{2,}\s*֏|\$\s?\d[\d\s,]{1,}(?:\.\d{1,2})?|\d[\
 DATE_RE  = re.compile(r"(Сегодня|Вчера)\s*,?\s*(\d{1,2}):(\d{2})")
 ALT_MD   = re.compile(r"!\[([^\]\n]{1,160})\]\((?:https?:)?//img\.list\.am/", re.I)
 ALT_HTML = re.compile(r"alt=\"([^\"]{1,160})\"", re.I)
+H1_HTML  = re.compile(r"<h1[^>]*>(.{2,200}?)</h1>", re.S | re.I)
 BANNER   = re.compile(r"!\[[^\]]*\]\((?:https?:)?//upa\.list\.am/[^)]*\)", re.I)
 
-# армянские буквы / кириллица / латиница
 HY_RE  = re.compile(r"[\u0530-\u058F]")
 CYR_RE = re.compile(r"[А-Яа-яЁё]")
 LAT_RE = re.compile(r"[A-Za-z]")
@@ -70,10 +70,10 @@ def is_blocked(text):
     return len(t) < 800 or any(m in t.lower() for m in BLOCKED)
 
 def plain(h):
+    h = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", h or "", flags=re.S | re.I)
     return " ".join(htmllib.unescape(re.sub(r"<[^>]+>", " ", h)).split())
 
 def script(s):
-    """hy — армянский, ru — кириллица, lat — латиница, none — ни одного."""
     s = s or ""
     if HY_RE.search(s):
         return "hy"
@@ -85,7 +85,7 @@ def script(s):
 
 def clean_title(s):
     s = htmllib.unescape(s or "")
-    s = re.sub(r"^\s*Image\s*\d+\s*[:.\-–—)]*\s*", "", s, flags=re.I)   # метка Jina
+    s = re.sub(r"^\s*Image\s*\d+\s*[:.\-–—)]*\s*", "", s, flags=re.I)
     s = re.sub(r"[\\]{1,2}", "", s)
     s = " ".join(s.split())
     return s[:140]
@@ -100,17 +100,58 @@ def alt_photos(photos):
     """Тот же набор в полном размере — вторая попытка, если альбом не ушёл."""
     return [re.sub(r"(img\.list\.am)/[a-z]+/", r"\1/f/", p, count=1) for p in photos]
 
+# ---------- браузер: только он видит галерею ----------
+
+_pw = None
+_browser = None
+
+def browser_html(url, wait_ms=2500):
+    global _pw, _browser
+    try:
+        if _browser is None:
+            from playwright.sync_api import sync_playwright
+            _pw = sync_playwright().start()
+            _browser = _pw.chromium.launch(args=["--no-sandbox"])
+        page = _browser.new_page(user_agent=HDRS["User-Agent"],
+                                 locale="ru-RU", viewport={"width": 1366, "height": 900})
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(wait_ms)
+            try:
+                page.mouse.wheel(0, 1200)      # дотолкать lazy-загрузку
+                page.wait_for_timeout(800)
+            except Exception:
+                pass
+            html = page.content()
+        finally:
+            page.close()
+        return html
+    except Exception as e:
+        print("  браузер не открыл страницу:", type(e).__name__, str(e)[:120])
+        return ""
+
+def browser_stop():
+    global _pw, _browser
+    try:
+        if _browser:
+            _browser.close()
+        if _pw:
+            _pw.stop()
+    except Exception:
+        pass
+    _browser = None
+    _pw = None
+
 # ---------- разбор карточек раздела ----------
 
 def card_title(win, pm):
-    """Заголовок строго этой карточки: подпись её картинки, иначе первая строка."""
     title = ""
-    for m in ALT_MD.finditer(win):          # подпись привязана к img.list.am
+    for m in ALT_MD.finditer(win):
         title = clean_title(m.group(1))
     if len(title) >= 3 and not PHOTO_RE.search(title):
         return title
 
-    if pm:                                  # html-вариант: alt рядом с фото
+    if pm:
         around = win[max(0, pm.start() - 300):pm.end() + 120]
         for m in ALT_HTML.finditer(around):
             title = clean_title(m.group(1))
@@ -127,18 +168,16 @@ def card_title(win, pm):
     return ""
 
 def card_place(win, pos, span=200):
-    """Место — последний кусок перед датой, после «›» категории."""
     seg = win[max(0, pos - span):pos]
     if "›" in seg:
         seg = seg.rsplit("›", 1)[1]
     seg = re.sub(r"[\[\]()|*]", " ", seg)
     seg = " ".join(seg.split()).strip(" ,·—")
-    if re.search(r"[\d֏$]", seg):           # цена/цифры — не место
+    if re.search(r"[\d֏$]", seg):
         return ""
     return seg[-40:].strip(" ,") if 2 <= len(seg) <= 60 else ""
 
 def parse_cards(text):
-    """Каждая карточка разбирается в своём окне — поля не смешиваются."""
     out = {}
     text = BANNER.sub(" ", text or "")
     hits = [(m.group(1), m) for m in ITEM_RE.finditer(text)]
@@ -151,7 +190,7 @@ def parse_cards(text):
 
         pm = None
         for pm in PHOTO_RE.finditer(win):
-            pass                            # последнее фото карточки
+            pass
         photo = ok_photo(pm.group(0)) if pm else ""
 
         price = ""
@@ -178,7 +217,7 @@ def is_fresh(ts):
     now = time.time()
     return 0 <= now - ts <= FRESH_H * 3600
 
-# ---------- страница объявления (дополнение, не обязательно) ----------
+# ---------- страница объявления ----------
 
 def direct(sess, url):
     try:
@@ -208,33 +247,45 @@ def extract_desc(text):
     return s[:700]
 
 def item_extra(sess, iid):
-    """Заголовок, все фото галереи (до 10) и описание. Неудача публикации не мешает."""
+    """До 10 фото галереи, описание и заголовок. Неудача публикации не мешает."""
     url = f"{BASE}/ru/item/{iid}"
-    sources = [("прямой", direct(sess, url)),
-               ("jina", jina(sess, url)),
-               ("jina-html", jina(sess, url, {"x-respond-with": "html"}))]
-
-    photos, desc, title = {}, "", ""
+    photos, state = {}, {"desc": "", "title": ""}
     counts = []
-    for name, src in sources:
+
+    def take(name, src, cut_similar=False):
         if not src:
-            counts.append(f"{name}: 0")
-            continue
+            counts.append(f"{name}: –")
+            return
+        if cut_similar:
+            low = src.lower()
+            for mark in ("похожие объявления", "похожие", "similar ads"):
+                i = low.find(mark)
+                if i > 1000:
+                    src = src[:i]
+                    break
         was = len(photos)
         for m in PHOTO_RE.finditer(src.replace("\\/", "/")):
             u = ok_photo(m.group(0))
             photos[u.rsplit("/", 1)[-1]] = u
         counts.append(f"{name}: {len(photos) - was}")
-        if not desc:
-            desc = extract_desc(plain(src) if name == "прямой" else src)
-        if not title:
-            m = re.search(r"^#\s+(.+)$", src, re.M)
+        if not state["desc"]:
+            state["desc"] = extract_desc(plain(src) if "<" in src[:400] else src)
+        if not state["title"]:
+            m = re.search(r"^#\s+(.+)$", src, re.M) or H1_HTML.search(src)
             if m:
-                title = clean_title(m.group(1))
+                state["title"] = clean_title(plain(m.group(1)) if "<" in m.group(1) else m.group(1))
+
+    take("браузер", browser_html(url), cut_similar=True)
+    if len(photos) < 2 or not state["desc"]:
+        take("jina", jina(sess, url))
+    if len(photos) < 2:
+        take("jina-html", jina(sess, url, {"x-respond-with": "html"}))
+    if len(photos) < 2:
+        take("прямой", direct(sess, url))
 
     print(f"  {iid}: фото {len(photos)} ({', '.join(counts)}), "
-          f"описание {len(desc)} знаков, заголовок {'да' if title else 'нет'}")
-    return {"photos": list(photos.values())[:10], "desc": desc, "title": title}
+          f"описание {len(state['desc'])} знаков, заголовок {'да' if state['title'] else 'нет'}")
+    return {"photos": list(photos.values())[:10], "desc": state["desc"], "title": state["title"]}
 
 # ---------- текст ----------
 
@@ -269,17 +320,16 @@ def make_caption(sess, e, extra):
 
 # ---------- Telegram ----------
 
-def telegram(sess, method, data=None, params=None):
+def telegram(sess, method, data=None):
     return sess.post(f"https://api.telegram.org/bot{TOKEN}/{method}",
-                     data=data, params=params, timeout=60)
+                     data=data, timeout=60)
 
 def try_album(sess, photos, caption):
     media = [{"type": "photo", "media": photos[0], "caption": caption}]
     for p in photos[1:10]:
         media.append({"type": "photo", "media": p})
     r = telegram(sess, "sendMediaGroup",
-                 {"chat_id": CHAT_ID,
-                  "media": json.dumps(media, ensure_ascii=False)})
+                 {"chat_id": CHAT_ID, "media": json.dumps(media, ensure_ascii=False)})
     print("telegram album:", r.status_code, r.text[:200])
     return r
 
@@ -339,7 +389,6 @@ def load():
     return {}
 
 def norm_queue(st):
-    """Очередь хранится словарями; старые записи-идентификаторы выбрасываем."""
     q, dropped = [], 0
     for e in st.get("queue", []):
         if isinstance(e, dict) and e.get("id"):
@@ -365,7 +414,7 @@ def main():
     sess = requests.Session()
     now = time.time()
 
-    # 1. карточки разделов: заголовок, цена, место, фото, время
+    # 1. карточки разделов
     fresh_cards = {}
     for cat, name in SECTIONS.items():
         md = jina(sess, f"{BASE}/ru/category/{cat}")
@@ -399,6 +448,7 @@ def main():
     if TEST:
         for e in st["queue"][:3]:
             print("---", e["url"], "|", make_caption(sess, e, {"desc": ""}))
+        browser_stop()
         return
 
     # 3. публикации
@@ -438,7 +488,7 @@ def main():
             st["failed"][e["id"]] = st["failed"].get(e["id"], 0) + 1
             print("  не вышло:", e["id"], "ошибок", st["failed"][e["id"]])
             if st["failed"][e["id"]] < 2:
-                st["queue"].append(e)          # вернём в конец очереди
+                st["queue"].append(e)
         print("за запуск опубликовано:", sent)
     else:
         print("публиковать нечего или ещё не прошёл интервал")
@@ -449,6 +499,7 @@ def main():
     if len(st["failed"]) > 5000:
         st["failed"] = {}
 
+    browser_stop()
     json.dump(st, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
     print("готово, в очереди:", len(st["queue"]))
 
