@@ -2,10 +2,11 @@
 """
 list.am -> Telegram («Барахолка Երևան»).
 
-Новые объявления берутся из карточек разделов: заголовок, цена, место, фото, время.
-Публикация не зависит от страницы объявления: если она не читается (403 / защита),
-пост всё равно уходит с данными и фото из карточки. Страница объявления —
-дополнение: все фото галереи и описание.
+Все поля карточки (заголовок, цена, место, фото, время) берутся из одного окна
+одной карточки — соседние объявления не подмешиваются. Публикация не зависит от
+страницы объявления: если она не читается (403 / защита), пост всё равно уходит
+с данными и фото из карточки. Страница объявления — дополнение: заголовок,
+галерея (до 10 фото) и описание.
 """
 import os
 import re
@@ -20,7 +21,7 @@ TOKEN    = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 STATE       = "state.json"
-INTERVAL = 10 * 60
+INTERVAL    = 10 * 60     # пауза между публикациями, сек
 PUBLISH_MAX = 3           # сколько публикаций за один запуск (1 = как было)
 QUEUE_MAX   = 250         # максимум объявлений в очереди
 FRESH_H     = 24          # сколько часов объявление считается свежим
@@ -48,7 +49,15 @@ ITEM_RE  = re.compile(r"/ru/item/(\d+)")
 PHOTO_RE = re.compile(r"(?:https?:)?//img\.list\.am/[a-z]+/\d+/\d+\.(?:webp|jpg|jpeg|png)", re.I)
 PRICE_RE = re.compile(r"\d[\d\s,]{2,}\s*֏|\$\s?\d[\d\s,]{1,}(?:\.\d{1,2})?|\d[\d\s,]{2,}\s*₽")
 DATE_RE  = re.compile(r"(Сегодня|Вчера)\s*,?\s*(\d{1,2}):(\d{2})")
-TITLE_RE = re.compile(r"!\[([^\]\n]{2,140})\]\(|alt=\"([^\"]{2,140})\"")
+ALT_MD   = re.compile(r"!\[([^\]\n]{1,160})\]\((?:https?:)?//img\.list\.am/", re.I)
+ALT_HTML = re.compile(r"alt=\"([^\"]{1,160})\"", re.I)
+BANNER   = re.compile(r"!\[[^\]]*\]\((?:https?:)?//upa\.list\.am/[^)]*\)", re.I)
+
+# армянские буквы / кириллица / латиница
+HY_RE  = re.compile(r"[\u0530-\u058F]")
+CYR_RE = re.compile(r"[А-Яа-яЁё]")
+LAT_RE = re.compile(r"[A-Za-z]")
+
 BLOCKED  = ("just a moment", "attention required", "enable javascript",
             "checking your browser", "cloudflare", "performing security verification")
 
@@ -63,69 +72,104 @@ def is_blocked(text):
 def plain(h):
     return " ".join(htmllib.unescape(re.sub(r"<[^>]+>", " ", h)).split())
 
-# ---------- разбор карточек раздела ----------
-
-def nearest(pat, text, pos, span=600):
-    """Ближайшее совпадение к ссылке — работает и в html, и в markdown."""
-    best, bestd = None, 10 ** 9
-    for m in pat.finditer(text, max(0, pos - span), min(len(text), pos + span)):
-        d = abs(m.start() - pos)
-        if d < bestd:
-            best, bestd = m, d
-    return best
+def script(s):
+    """hy — армянский, ru — кириллица, lat — латиница, none — ни одного."""
+    s = s or ""
+    if HY_RE.search(s):
+        return "hy"
+    if CYR_RE.search(s):
+        return "ru"
+    if LAT_RE.search(s):
+        return "lat"
+    return "none"
 
 def clean_title(s):
     s = htmllib.unescape(s or "")
-    s = re.sub(r"^\s*Image\s*\d+\s*[:.\-]\s*", "", s, flags=re.I)   # метка Jina
+    s = re.sub(r"^\s*Image\s*\d+\s*[:.\-–—)]*\s*", "", s, flags=re.I)   # метка Jina
     s = re.sub(r"[\\]{1,2}", "", s)
     s = " ".join(s.split())
     return s[:140]
 
-def card_place(text, pos, span=220):
+def ok_photo(u):
+    u = htmllib.unescape(u or "")
+    if u.startswith("//"):
+        u = "https:" + u
+    return u
+
+def alt_photos(photos):
+    """Тот же набор в полном размере — вторая попытка, если альбом не ушёл."""
+    return [re.sub(r"(img\.list\.am)/[a-z]+/", r"\1/f/", p, count=1) for p in photos]
+
+# ---------- разбор карточек раздела ----------
+
+def card_title(win, pm):
+    """Заголовок строго этой карточки: подпись её картинки, иначе первая строка."""
+    title = ""
+    for m in ALT_MD.finditer(win):          # подпись привязана к img.list.am
+        title = clean_title(m.group(1))
+    if len(title) >= 3 and not PHOTO_RE.search(title):
+        return title
+
+    if pm:                                  # html-вариант: alt рядом с фото
+        around = win[max(0, pm.start() - 300):pm.end() + 120]
+        for m in ALT_HTML.finditer(around):
+            title = clean_title(m.group(1))
+        if len(title) >= 3 and not PHOTO_RE.search(title):
+            return title
+
+    for raw in re.sub(r"!\[[^\]]*\]\([^)]*\)", "\n", win).splitlines():
+        s = " ".join(htmllib.unescape(raw).split()).strip(" []()|*\\-—")
+        if len(s) < 3 or "›" in s or "·" in s or s.isdigit():
+            continue
+        if PRICE_RE.search(s) or DATE_RE.search(s) or "img.list.am" in s:
+            continue
+        return clean_title(s)
+    return ""
+
+def card_place(win, pos, span=200):
     """Место — последний кусок перед датой, после «›» категории."""
-    seg = text[max(0, pos - span):pos]
+    seg = win[max(0, pos - span):pos]
     if "›" in seg:
         seg = seg.rsplit("›", 1)[1]
     seg = re.sub(r"[\[\]()|*]", " ", seg)
     seg = " ".join(seg.split()).strip(" ,·—")
+    if re.search(r"[\d֏$]", seg):           # цена/цифры — не место
+        return ""
     return seg[-40:].strip(" ,") if 2 <= len(seg) <= 60 else ""
 
-def full_photo(u):
-    """img.list.am/r/692/96450692.webp -> img.list.am/f/692/96450692.webp"""
-    u = htmllib.unescape(u or "")
-    if u.startswith("//"):
-        u = "https:" + u
-    return re.sub(r"(img\.list\.am)/[a-z]+/", r"\1/f/", u, count=1)
-
 def parse_cards(text):
-    """{id: {id, url, title, price, place, photo, ts}} по карточкам раздела."""
+    """Каждая карточка разбирается в своём окне — поля не смешиваются."""
     out = {}
-    text = text or ""
-    for m in ITEM_RE.finditer(text):
-        iid = m.group(1)
+    text = BANNER.sub(" ", text or "")
+    hits = [(m.group(1), m) for m in ITEM_RE.finditer(text)]
+    prev_end = 0
+    for iid, m in hits:
+        win = text[prev_end:m.start()]
+        prev_end = m.end()
         if iid in out:
             continue
-        pos = m.start()
-        pm = nearest(PHOTO_RE, text, pos)
-        pr = nearest(PRICE_RE, text, pos)
-        tm = nearest(TITLE_RE, text, pos)
-        dm = nearest(DATE_RE, text, pos)
 
-        photo = full_photo(pm.group(0)) if pm else ""
-        title = clean_title((tm.group(1) or tm.group(2)) if tm else "")
-        price = " ".join(pr.group(0).split()) if pr else ""
+        pm = None
+        for pm in PHOTO_RE.finditer(win):
+            pass                            # последнее фото карточки
+        photo = ok_photo(pm.group(0)) if pm else ""
+
+        price = ""
+        for pr in PRICE_RE.finditer(win):
+            price = " ".join(pr.group(0).split())
 
         ts, place = 0, ""
-        if dm:
+        for dm in DATE_RE.finditer(win):
             d = datetime.now(TZ).replace(hour=int(dm.group(2)), minute=int(dm.group(3)),
                                          second=0, microsecond=0)
             if dm.group(1).lower().startswith("вчера"):
                 d = d - timedelta(days=1)
             ts = int(d.timestamp())
-            place = card_place(text, dm.start())
+            place = card_place(win, dm.start())
 
-        out[iid] = {"id": iid, "url": f"{BASE}/ru/item/{iid}", "title": title,
-                    "price": price, "place": place, "photo": photo, "ts": ts}
+        out[iid] = {"id": iid, "url": f"{BASE}/ru/item/{iid}",
+                    "title": card_title(win, pm), "price": price,
+                    "place": place, "photo": photo, "ts": ts}
     return out
 
 def is_fresh(ts):
@@ -164,47 +208,56 @@ def extract_desc(text):
     return s[:700]
 
 def item_extra(sess, iid):
-    """Все фото галереи и описание. Неудача публикации не мешает."""
+    """Заголовок, все фото галереи (до 10) и описание. Неудача публикации не мешает."""
     url = f"{BASE}/ru/item/{iid}"
+    sources = [("прямой", direct(sess, url)),
+               ("jina", jina(sess, url)),
+               ("jina-html", jina(sess, url, {"x-respond-with": "html"}))]
 
-    html = direct(sess, url)                 # html -> вся галерея
-    md = jina(sess, url)                     # markdown -> описание
-
-    photos, desc = {}, ""
-    for src in ((html.replace("\\/", "/") if html else ""), md or ""):
-        for m in PHOTO_RE.finditer(src):
-            u = full_photo(m.group(0))
+    photos, desc, title = {}, "", ""
+    counts = []
+    for name, src in sources:
+        if not src:
+            counts.append(f"{name}: 0")
+            continue
+        was = len(photos)
+        for m in PHOTO_RE.finditer(src.replace("\\/", "/")):
+            u = ok_photo(m.group(0))
             photos[u.rsplit("/", 1)[-1]] = u
-    if html:
-        desc = extract_desc(plain(html))
-    if not desc:
-        cut = (md or "").find("Похожие")
-        desc = extract_desc(md[:cut] if cut > 0 else md)
+        counts.append(f"{name}: {len(photos) - was}")
+        if not desc:
+            desc = extract_desc(plain(src) if name == "прямой" else src)
+        if not title:
+            m = re.search(r"^#\s+(.+)$", src, re.M)
+            if m:
+                title = clean_title(m.group(1))
 
-    print(f"  {iid}: фото {len(photos)}, описание {len(desc)} знаков")
-    return {"photos": list(photos.values())[:10], "desc": desc}
+    print(f"  {iid}: фото {len(photos)} ({', '.join(counts)}), "
+          f"описание {len(desc)} знаков, заголовок {'да' if title else 'нет'}")
+    return {"photos": list(photos.values())[:10], "desc": desc, "title": title}
 
 # ---------- текст ----------
 
 def translate(sess, text):
+    """Перевод не обязателен: не вышло — публикуем как есть."""
     text = (text or "").strip()
-    if not text or re.search(r"[А-Яа-яЁё]", text):
+    if not text or script(text) != "hy":
         return text
     try:
         r = sess.get("https://translate.googleapis.com/translate_a/single",
-                     params={"client": "gtx", "sl": "auto", "tl": "ru",
+                     params={"client": "gtx", "sl": "hy", "tl": "ru",
                              "dt": "t", "q": text[:2000]}, timeout=30)
         res = "".join(p[0] for p in r.json()[0] if p and p[0]).strip()
-        if res:
+        if res and script(res) != "lat":
             return res
     except Exception as e:
-        print("  перевод недоступен:", type(e).__name__)
+        print("  перевод недоступен, публикуем оригинал:", type(e).__name__)
     return text
 
 def make_caption(sess, e, extra):
-    head = translate(sess, e["title"]).strip()
+    head = translate(sess, extra.get("title") or e["title"]).strip()
     if not head:
-        head = translate(sess, e["place"]).strip()
+        head = e["place"].strip()
     lines = [head] if head else []
     if e["price"]:
         lines.append(e["price"])
@@ -216,23 +269,33 @@ def make_caption(sess, e, extra):
 
 # ---------- Telegram ----------
 
+def telegram(sess, method, data=None, params=None):
+    return sess.post(f"https://api.telegram.org/bot{TOKEN}/{method}",
+                     data=data, params=params, timeout=60)
+
+def try_album(sess, photos, caption):
+    media = [{"type": "photo", "media": photos[0], "caption": caption}]
+    for p in photos[1:10]:
+        media.append({"type": "photo", "media": p})
+    r = telegram(sess, "sendMediaGroup",
+                 {"chat_id": CHAT_ID,
+                  "media": json.dumps(media, ensure_ascii=False)})
+    print("telegram album:", r.status_code, r.text[:200])
+    return r
+
 def send(sess, e, photos, caption):
     markup = {"inline_keyboard": [[{"text": "Связаться", "url": e["url"]}]]}
 
     if len(photos) >= 2:
-        media = [{"type": "photo", "media": photos[0], "caption": caption}]
-        for p in photos[1:10]:
-            media.append({"type": "photo", "media": p})
-        r = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendMediaGroup",
-                      data={"chat_id": CHAT_ID,
-                            "media": json.dumps(media, ensure_ascii=False)},
-                      timeout=60)
-        print("telegram album:", r.status_code, r.text[:200])
+        r = try_album(sess, photos, caption)
         if not r.ok:
-            payload = {"chat_id": CHAT_ID, "photo": photos[0],
-                       "caption": caption, "reply_markup": json.dumps(markup)}
-            r1 = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendPhoto",
-                           data=payload, timeout=40)
+            alt = alt_photos(photos)
+            if alt != photos:
+                r = try_album(sess, alt, caption)
+        if not r.ok:
+            r1 = telegram(sess, "sendPhoto",
+                          {"chat_id": CHAT_ID, "photo": photos[0],
+                           "caption": caption, "reply_markup": json.dumps(markup)})
             print("telegram fallback:", r1.status_code, r1.text[:200])
             return r1.ok
 
@@ -244,26 +307,24 @@ def send(sess, e, photos, caption):
         except Exception:
             mid = None
 
-        payload = {"chat_id": CHAT_ID, "text": "Связаться с продавцом",
-                   "reply_markup": json.dumps(markup)}
+        data = {"chat_id": CHAT_ID, "text": "Связаться с продавцом",
+                "reply_markup": json.dumps(markup)}
         if mid:
-            payload["reply_parameters"] = json.dumps({"message_id": mid})
-        r2 = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-                       data=payload, timeout=40)
+            data["reply_parameters"] = json.dumps({"message_id": mid})
+        r2 = telegram(sess, "sendMessage", data)
         print("telegram кнопка:", r2.status_code, r2.text[:200])
         return r.ok
 
-    payload = {"chat_id": CHAT_ID, "reply_markup": json.dumps(markup)}
+    data = {"chat_id": CHAT_ID, "reply_markup": json.dumps(markup)}
     if photos:
-        payload["photo"] = photos[0]
-        payload["caption"] = caption
+        data["photo"] = photos[0]
+        data["caption"] = caption
         method = "sendPhoto"
     else:
-        payload["text"] = caption
+        data["text"] = caption
         method = "sendMessage"
 
-    r = sess.post(f"https://api.telegram.org/bot{TOKEN}/{method}",
-                  data=payload, timeout=40)
+    r = telegram(sess, method, data)
     print("telegram:", r.status_code, r.text[:300])
     return r.ok
 
@@ -316,16 +377,20 @@ def main():
         fresh_cards.update(fresh)
         time.sleep(3)
 
-    # 2. новое — в очередь
+    # 2. новое — в очередь (латиница не берётся)
     known = {e["id"] for e in st["queue"]}
-    added = 0
+    added, latin = 0, 0
     for iid, c in fresh_cards.items():
         if iid in st["seen"] or iid in st["published"] or iid in known:
             continue
         st["seen"].append(iid)
+        if script(c["title"]) == "lat":
+            latin += 1
+            print(f"    латиница, в очередь не идёт: {iid} «{c['title'][:60]}»")
+            continue
         st["queue"].append(c)
         added += 1
-    print(f"новых в очередь: {added}")
+    print(f"новых в очередь: {added}, отброшено латиницы: {latin}")
     st["seen"] = st["seen"][-100000:]
     while len(st["queue"]) > QUEUE_MAX:
         st["queue"].pop(0)
@@ -344,8 +409,11 @@ def main():
             e = st["queue"].pop(0)
             if e["id"] in st["published"]:
                 continue
+            if script(e["title"]) == "lat":
+                print("  латиница, из очереди убрано:", e["id"])
+                continue
 
-            extra = {"photos": [], "desc": ""}
+            extra = {"photos": [], "desc": "", "title": ""}
             try:
                 extra = item_extra(sess, e["id"])
             except Exception as ex:
@@ -364,7 +432,7 @@ def main():
                 st["last_publish"] = now
                 st["published"][e["id"]] = now
                 sent += 1
-                print("опубликовано:", e["id"])
+                print("опубликовано:", e["id"], f"фото {len(photos)}")
                 continue
 
             st["failed"][e["id"]] = st["failed"].get(e["id"], 0) + 1
@@ -376,7 +444,7 @@ def main():
         print("публиковать нечего или ещё не прошёл интервал")
 
     if len(st["published"]) > 50000:
-        keys = list(st["published"])[-20000:]
+        keys = list(st["published"])[-50000:]
         st["published"] = {k: st["published"][k] for k in keys}
     if len(st["failed"]) > 5000:
         st["failed"] = {}
