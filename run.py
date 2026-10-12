@@ -2,14 +2,13 @@
 """
 Диспетчер: один запуск = один пост в «Барахолка Երևան».
 
-Сайт list.am из работы убран: он закрывает облачные адреса.
-Работают два сайта, и они чередуются по слотам (время Еревана):
-  :00 :15 :30 :45 -> ivi.am, gortsarq.am, ivi.am, gortsarq.am и так далее
+Два сайта, поровну по слотам (время Еревана):
+  чётный час:  :00 :30 -> ivi.am        :15 :45 -> gortsarq.am
+  нечётный час: :00 :30 -> gortsarq.am  :15 :45 -> ivi.am
 
-Если у выбранного сайта свежего нет — пробуем второй сайт.
+Если у выбранного сайта свежего нет — слот забирает второй сайт.
 SOURCE=ivi|gortsarq (workflow_dispatch) — ручная проверка одного сайта.
-Очередь list.am остаётся в state.json нетронутой: если когда-нибудь
-захочется вернуть его в работу, там всё на месте.
+list.am из работы исключён.
 """
 import os
 import importlib
@@ -42,19 +41,11 @@ def main():
     want = slot_source()
     print(f"слот {now:%H:%M} ({'ручной' if SOURCE in MODS else 'auto'}) -> {want}")
 
-    done = run(want)
-    print(f"{want}: опубликовано {done}")
-    if done:
+    if run(want):
         return
 
-    for alt in ALT:
-        if alt == want:
-            continue
-        print(f"{want} пусто — пробуем {alt}")
-        done = run(alt)
-        print(f"{alt}: опубликовано {done}")
-        if done:
-            return
-    print("в двух сайтах нечего публиковать")
+    other = "gortsarq" if want == "ivi" else "ivi"
+    print(f"{want} пусто — пробуем {other}")
+    run(other)
 
 main()
