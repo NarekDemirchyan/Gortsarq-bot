@@ -12,9 +12,10 @@
    запрос повторяется до трёх раз с паузой.
 
 3. Чистка ivi.am. На страницах ivi.am вместе с текстом лежат скрипты
-   (счётчики, реклама). Бот убирает пітаги, но текст внутри script остаётся
+   (счётчики, реклама). Бот убирает теги, но текст внутри script остаётся
    и попадает в описание объявления. Здесь код и стили вырезаются
-   из ответа ещё до разбора.
+   из ответа ещё до разбора, а адреса фотографий объявления собираются
+   из ответа до вырезания и возвращаются в начало — иначе они пропадают.
 
 4. Альбом без повторов. list.am отдаёт одну фотографию в разных размерах,
    бот собирает галерею по имени файла и берёт обе. Здесь альбом
@@ -44,6 +45,9 @@ BLOCK_WORDS = ("security verification", "just a moment", "cf-chl",
                "attention required", "captcha", "проверка безопасности")
 SCRIPT_RE = re.compile(r"<(script|style|noscript)[^>]*>.*?</\1\s*>", re.S | re.I)
 COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
+ITEM_IMG_RE = re.compile(
+    r"(?:https?:(?:\\?/){2}ivi\.am)?(?:\\?/)+files(?:\\?/)+images(?:\\?/)+items"
+    r"(?:\\?/)+[^\s\"'<>]+?\.(?:jpg|jpeg|png|webp)", re.I)
 TRIES = 3
 
 # ---------- ключ Jina ----------
@@ -87,18 +91,47 @@ def _read(sess, old, url, kw):
 
 # ---------- чистка ivi.am ----------
 
-def _trim(r):
-    """Убрать код и стили из ответа: иначе они попадают в описание."""
+def _photos(body, url):
+    """Адреса фотографий объявления: сначала по номеру объявления."""
+    out = []
+    tail = url.split("/ru/item/", 1)[1] if "/ru/item/" in url else ""
+    nums = re.findall(r"\d{4,}", tail)
+    iid = nums[-1] if nums else ""
+    for m in ITEM_IMG_RE.finditer(body):
+        u = m.group(0).replace("\\/", "/")
+        if u.startswith("/"):
+            u = "https://ivi.am" + u
+        if u in out:
+            continue
+        if iid and iid in u:
+            out.append(u)
+    if not out:
+        for m in ITEM_IMG_RE.finditer(body[:60000]):
+            u = m.group(0).replace("\\/", "/")
+            if u.startswith("/"):
+                u = "https://ivi.am" + u
+            if u not in out:
+                out.append(u)
+            if len(out) >= 6:
+                break
+    return out
+
+def _trim(r, url=""):
+    """Убрать код и стили, но сохранить фотографии объявления."""
     try:
         body = getattr(r, "text", "") or ""
         if len(body) < 3000 or "script" not in body.lower():
             return r
+        saved = _photos(body, url) if "/ru/item/" in url else []
         clean = SCRIPT_RE.sub(" ", body)
         clean = COMMENT_RE.sub(" ", clean)
         if len(clean) < 2000:
             return r
+        if saved:
+            clean = " ".join('<img src="%s">' % u for u in saved[:10]) + " " + clean
         r._content = clean.encode("utf-8", "replace")
-        print("  ivi: код убран, знаков", len(body), "->", len(clean))
+        print("  ivi: код убран, знаков", len(body), "->", len(clean),
+              "| фото", len(saved))
     except Exception as e:
         print("  ivi: чистка не вышла:", type(e).__name__)
     return r
@@ -145,7 +178,7 @@ def _names(items):
 class _Answer(object):
     """Ответ, который видит бот, когда снимок ушёл обычным сообщением."""
 
-    def __init__(self, code, text):
+    def init(self, code, text):
         self.status_code = code
         self.text = text
 
@@ -195,7 +228,7 @@ def _patch():
             print("  чтение: сбой повтора:", type(e).__name__)
             r = old_get(self, url, **kw)
         if any(h in str(url) for h in CLEAN_HOSTS):
-            r = _trim(r)
+            r = _trim(r, str(url))
         return r
 
     def post(self, url, data=None, json=None, **kw):
