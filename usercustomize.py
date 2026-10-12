@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Этот файл бот загружает первым (см. bot.yml), до остальной работы.
-Три задачи.
+Четыре задачи.
 
 1. Ключ Jina. Читалка r.jina.ai в браузерном режиме открывает страницы,
    которые без ключа отдают проверку защиты. Ключ лежит в секрете JINA_KEY
@@ -9,10 +9,14 @@
 
 2. Повтор чтения. list.am то пускает читалку, то закрывает её защитой.
    Если ответ слабый — ошибка, проверка защиты или почти пустой текст —
-   запрос повторяется до трёх раз с паузой. Так лишних повторов не будет,
-   а случайная неудача не оставит публикацию без описания.
+   запрос повторяется до трёх раз с паузой.
 
-3. Альбом без повторов. list.am отдаёт одну фотографию в разных размерах,
+3. Чистка ivi.am. На страницах ivi.am вместе с текстом лежат скрипты
+   (счётчики, реклама). Бот убирает пітаги, но текст внутри script остаётся
+   и попадает в описание объявления. Здесь код и стили вырезаются
+   из ответа ещё до разбора.
+
+4. Альбом без повторов. list.am отдаёт одну фотографию в разных размерах,
    бот собирает галерею по имени файла и берёт обе. Здесь альбом
    пересобирается по номеру фотографии: повтор убирается, из вариантов
    остаётся полный (папка f). Если остаётся один снимок, альбом отправлять
@@ -35,8 +39,11 @@ except Exception:
 JINA = "https://r.jina.ai/"
 KEY = os.environ.get("JINA_KEY", "")
 PAGES = ("list.am", "gortsarq")
+CLEAN_HOSTS = ("ivi.am",)
 BLOCK_WORDS = ("security verification", "just a moment", "cf-chl",
                "attention required", "captcha", "проверка безопасности")
+SCRIPT_RE = re.compile(r"<(script|style|noscript)[^>]*>.*?</\1\s*>", re.S | re.I)
+COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 TRIES = 3
 
 # ---------- ключ Jina ----------
@@ -77,6 +84,24 @@ def _read(sess, old, url, kw):
         if n < TRIES - 1:
             time.sleep(4 + 4 * n)
     return last
+
+# ---------- чистка ivi.am ----------
+
+def _trim(r):
+    """Убрать код и стили из ответа: иначе они попадают в описание."""
+    try:
+        body = getattr(r, "text", "") or ""
+        if len(body) < 3000 or "script" not in body.lower():
+            return r
+        clean = SCRIPT_RE.sub(" ", body)
+        clean = COMMENT_RE.sub(" ", clean)
+        if len(clean) < 2000:
+            return r
+        r._content = clean.encode("utf-8", "replace")
+        print("  ivi: код убран, знаков", len(body), "->", len(clean))
+    except Exception as e:
+        print("  ivi: чистка не вышла:", type(e).__name__)
+    return r
 
 # ---------- альбом без повторов ----------
 
@@ -163,10 +188,15 @@ def _patch():
             pass
         try:
             if str(url).startswith(JINA) and any(p in str(url) for p in PAGES):
-                return _read(self, old_get, url, kw)
+                r = _read(self, old_get, url, kw)
+            else:
+                r = old_get(self, url, **kw)
         except Exception as e:
-            print("  джина: повтор не вышел:", type(e).__name__)
-        return old_get(self, url, **kw)
+            print("  чтение: сбой повтора:", type(e).__name__)
+            r = old_get(self, url, **kw)
+        if any(h in str(url) for h in CLEAN_HOSTS):
+            r = _trim(r)
+        return r
 
     def post(self, url, data=None, json=None, **kw):
         if url and "sendMediaGroup" in str(url):
