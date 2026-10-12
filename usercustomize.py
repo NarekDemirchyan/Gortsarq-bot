@@ -1,13 +1,18 @@
 # -*- coding: utf-8 -*-
 """
 Этот файл бот загружает первым (см. bot.yml), до остальной работы.
-Две задачи.
+Три задачи.
 
 1. Ключ Jina. Читалка r.jina.ai в браузерном режиме открывает страницы,
    которые без ключа отдают проверку защиты. Ключ лежит в секрете JINA_KEY
    и подставляется в каждый запрос к r.jina.ai.
 
-2. Альбом без повторов. list.am отдаёт одну фотографию в разных размерах,
+2. Повтор чтения. list.am то пускает читалку, то закрывает её защитой.
+   Если ответ слабый — ошибка, проверка защиты или почти пустой текст —
+   запрос повторяется до трёх раз с паузой. Так лишних повторов не будет,
+   а случайная неудача не оставит публикацию без описания.
+
+3. Альбом без повторов. list.am отдаёт одну фотографию в разных размерах,
    бот собирает галерею по имени файла и берёт обе. Здесь альбом
    пересобирается по номеру фотографии: повтор убирается, из вариантов
    остаётся полный (папка f). Если остаётся один снимок, альбом отправлять
@@ -20,6 +25,7 @@
 import json
 import os
 import re
+import time
 
 try:
     import requests
@@ -28,6 +34,10 @@ except Exception:
 
 JINA = "https://r.jina.ai/"
 KEY = os.environ.get("JINA_KEY", "")
+PAGES = ("list.am", "gortsarq")
+BLOCK_WORDS = ("security verification", "just a moment", "cf-chl",
+               "attention required", "captcha", "проверка безопасности")
+TRIES = 3
 
 # ---------- ключ Jina ----------
 
@@ -37,6 +47,36 @@ def _with_key(url, headers):
     h = dict(headers or {})
     h.setdefault("Authorization", "Bearer " + KEY)
     return h
+
+# ---------- повтор чтения ----------
+
+def _weak(r):
+    """Ответ читалки слабый: ошибка, проверка защиты или пустое тело."""
+    try:
+        code = getattr(r, "status_code", 0)
+        text = getattr(r, "text", "") or ""
+    except Exception:
+        return False
+    if code != 200:
+        return True
+    if len(text) < 1500:
+        return True
+    low = text[:4000].lower()
+    return any(w in low for w in BLOCK_WORDS)
+
+def _read(sess, old, url, kw):
+    last = None
+    for n in range(TRIES):
+        last = old(sess, url, **kw)
+        if not _weak(last):
+            if n:
+                print("  джина: прочитано со", n + 1, "раза")
+            return last
+        print("  джина: слабый ответ", getattr(last, "status_code", "?"),
+              "-> повтор", n + 1)
+        if n < TRIES - 1:
+            time.sleep(4 + 4 * n)
+    return last
 
 # ---------- альбом без повторов ----------
 
@@ -121,6 +161,11 @@ def _patch():
             kw["headers"] = _with_key(url, kw.get("headers"))
         except Exception:
             pass
+        try:
+            if str(url).startswith(JINA) and any(p in str(url) for p in PAGES):
+                return _read(self, old_get, url, kw)
+        except Exception as e:
+            print("  джина: повтор не вышел:", type(e).__name__)
         return old_get(self, url, **kw)
 
     def post(self, url, data=None, json=None, **kw):
