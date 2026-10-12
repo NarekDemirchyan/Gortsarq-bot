@@ -19,10 +19,12 @@ import requests
 
 TOKEN    = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID", "")
+
 STATE       = "state.json"
 INTERVAL    = 10 * 60     # пауза между публикациями, сек
-PUBLISH_MAX = 3           # сколько публикаций за один запуск
+PUBLISH_MAX = 3           # сколько публикаций за один запуск (1 = как было)
 QUEUE_MAX   = 250         # максимум объявлений в очереди
+FRESH_H     = 24          # сколько часов объявление считается свежим
 TEST        = False       # True -> ничего не отправлять, только лог
 
 BASE = "https://www.list.am"
@@ -43,14 +45,16 @@ SECTIONS = {
     "17":  "Мода и стиль",
 }
 
-ITEM_RE  = re.compile(r"/ru/item/(\d+)")
-PHOTO_RE = re.compile(r"(?:https?:)?//img\.list\.am/[a-z]+/\d+/\d+\.(?:webp|jpg|jpeg|png)", re.I)
-PRICE_RE = re.compile(r"\d[\d\s,]{2,}\s*֏|\$\s?\d[\d\s,]{1,}(?:\.\d{1,2})?|\d[\d\s,]{2,}\s*₽")
-DATE_RE  = re.compile(r"(Сегодня|Вчера)\s*,?\s*(\d{1,2}):(\d{2})")
-ALT_MD   = re.compile(r"!\[([^\]\n]{1,160})\]\((?:https?:)?//img\.list\.am/", re.I)
-ALT_HTML = re.compile(r"alt=\"([^\"]{1,160})\"", re.I)
-H1_HTML  = re.compile(r"<h1[^>]*>(.{2,200}?)</h1>", re.S | re.I)
-BANNER   = re.compile(r"!\[[^\]]*\]\((?:https?:)?//upa\.list\.am/[^)]*\)", re.I)
+ITEM_RE   = re.compile(r"/ru/item/(\d+)")
+PHOTO_RE  = re.compile(r"(?:https?:)?//img\.list\.am/[a-z]+/\d+/\d+\.(?:webp|jpg|jpeg|png)", re.I)
+PRICE_RE  = re.compile(r"\d[\d\s,]{2,}\s*֏|\$\s?\d[\d\s,]{1,}(?:\.\d{1,2})?|\d[\d\s,]{2,}\s*₽")
+DATE_RE   = re.compile(r"(Сегодня|Вчера)\s*,?\s*(\d{1,2}):(\d{2})")
+ALT_MD    = re.compile(r"!\[([^\]\n]{1,160})\]\((?:https?:)?//img\.list\.am/", re.I)
+ALT_HTML  = re.compile(r"alt=\"([^\"]{1,160})\"", re.I)
+H1_HTML   = re.compile(r"<h1[^>]*>(.{2,200}?)</h1>", re.S | re.I)
+TITLE_TAG = re.compile(r"<title[^>]*>(.{2,200}?)</title>", re.S | re.I)
+BANNER    = re.compile(r"!\[[^\]]*\]\((?:https?:)?//upa\.list\.am/[^)]*\)", re.I)
+JUNK_TXT  = re.compile(r"list\.am|https?://|www\.|@|\+\d{2}\s?\d", re.I)   # адреса и телефоны
 
 HY_RE  = re.compile(r"[\u0530-\u058F]")
 CYR_RE = re.compile(r"[А-Яа-яЁё]")
@@ -84,6 +88,7 @@ def script(s):
 def clean_title(s):
     s = htmllib.unescape(s or "")
     s = re.sub(r"^\s*Image\s*\d+\s*[:.\-–—)]*\s*", "", s, flags=re.I)
+    s = re.sub(r"\s*[-|–—]?\s*(www\.)?list\.am.*$", "", s, flags=re.I)   # хвост адреса
     s = re.sub(r"[\\]{1,2}", "", s)
     s = " ".join(s.split())
     return s[:140]
@@ -143,6 +148,7 @@ def browser_stop():
 # ---------- разбор карточек раздела ----------
 
 def card_title(win, pm):
+    """Заголовок строго этой карточки: подпись её картинки, иначе первая строка."""
     title = ""
     for m in ALT_MD.finditer(win):
         title = clean_title(m.group(1))
@@ -158,20 +164,23 @@ def card_title(win, pm):
 
     for raw in re.sub(r"!\[[^\]]*\]\([^)]*\)", "\n", win).splitlines():
         s = " ".join(htmllib.unescape(raw).split()).strip(" []()|*\\-—")
-        if len(s) < 3 or "›" in s or "·" in s or s.isdigit():
+        if len(s) < 3 or s.isdigit() or "img.list.am" in s:
             continue
-        if PRICE_RE.search(s) or DATE_RE.search(s) or "img.list.am" in s:
+        if DATE_RE.search(s) or "›" in s:
             continue
-        return clean_title(s)
+        s = clean_title(PRICE_RE.sub(" ", s))       # цена в той же строке — не помеха
+        if len(s) >= 3 and not PHOTO_RE.search(s):
+            return s
     return ""
 
 def card_place(win, pos, span=200):
+    """Место — последний кусок перед датой, после «›» категории."""
     seg = win[max(0, pos - span):pos]
     if "›" in seg:
         seg = seg.rsplit("›", 1)[1]
     seg = re.sub(r"[\[\]()|*]", " ", seg)
     seg = " ".join(seg.split()).strip(" ,·—")
-    if re.search(r"[\d֏$]", seg):
+    if re.search(r"[\d֏$]", seg) or JUNK_TXT.search(seg):
         return ""
     return seg[-40:].strip(" ,") if 2 <= len(seg) <= 60 else ""
 
@@ -247,8 +256,7 @@ def extract_desc(text):
 def item_extra(sess, iid):
     """До 10 фото галереи, описание и заголовок. Неудача публикации не мешает."""
     url = f"{BASE}/ru/item/{iid}"
-    photos, state = {}, {"desc": "", "title": ""}
-    counts = []
+    photos, state, counts = {}, {"desc": "", "title": ""}, []
 
     def take(name, src, cut_similar=False):
         if not src:
@@ -269,9 +277,11 @@ def item_extra(sess, iid):
         if not state["desc"]:
             state["desc"] = extract_desc(plain(src) if "<" in src[:400] else src)
         if not state["title"]:
-            m = re.search(r"^#\s+(.+)$", src, re.M) or H1_HTML.search(src)
+            m = re.search(r"^#\s+(.+)$", src, re.M) or H1_HTML.search(src) or TITLE_TAG.search(src)
             if m:
-                state["title"] = clean_title(plain(m.group(1)) if "<" in m.group(1) else m.group(1))
+                t = clean_title(plain(m.group(1)) if "<" in m.group(1) else m.group(1))
+                if len(t) >= 3 and not JUNK_TXT.search(t):
+                    state["title"] = t
 
     take("браузер", browser_html(url), cut_similar=True)
     if len(photos) < 2 or not state["desc"]:
@@ -305,8 +315,10 @@ def translate(sess, text):
 
 def make_caption(sess, e, extra):
     head = translate(sess, extra.get("title") or e["title"]).strip()
-    if not head:
+    if not head or JUNK_TXT.search(head):
         head = e["place"].strip()
+    if JUNK_TXT.search(head):
+        head = ""
     lines = [head] if head else []
     if e["price"]:
         lines.append(e["price"])
