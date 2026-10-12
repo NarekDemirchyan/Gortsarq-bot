@@ -8,9 +8,10 @@ ivi.am -> Telegram («Барахолка Երևան»).
   2. Добираем новые объявления, но не дольше MAX_SECONDS.
   3. Состояние сохраняется после каждой ступени.
 
-Настройки сбора подобраны под 25-минутный потолок GitHub Actions: разделам
-хватает MAX_PAGES страниц, потому что обновлённое за неделю всегда лежит на
-первых двух.
+Раздел листается, пока на странице есть свежее за FRESH_H часов и пока идут
+новые карточки. MAX_PAGES — только предохранитель, обычно до него не доходит:
+в списке сначала идут самые свежие, поэтому страница без свежих означает, что
+дальше только старое.
 
 Чтение идёт прямым запросом первым (list.am отвечает ему быстро), а Jina и
 открытые прокси остаются запасными: по одной попытке, без повторов.
@@ -18,8 +19,10 @@ ivi.am -> Telegram («Барахолка Երևան»).
 Фотографии берём только из папки самого объявления (/files/images/items/):
 картинки меню, баннеров и рекламных плашек не публикуем. Закрытые телефоны
 вида «(0x xxx xxxx)» вырезаем из текста. Подписи кнопок сайта заголовком не
-становятся. Заголовок и описание переводим на русский, не вышло — публикуем
-оригинал. Без фото объявление пропускаем.
+становятся. Инфинитив вроде «Одеваться» заголовком не ставим. Заголовок и
+описание переводим на русский, не вышло — публикуем оригинал. Без фото
+объявление пропускаем. Перед публикацией очередь перемешивается, чтобы разделы
+шли вперемешку.
 
 Знаки «<» и «>» в разборе страниц набраны кодом символа: в переписке такие
 сочетания иногда съедаются, и регэксп остаётся пустым.
@@ -28,6 +31,7 @@ import os
 import re
 import json
 import time
+import random
 import html as htmllib
 from datetime import datetime, timedelta, timezone
 
@@ -48,7 +52,7 @@ PUBLISH_MAX = 1          # публикаций за один запуск
 QUEUE_MAX   = 2000       # предел очереди
 FRESH_H     = 168        # сколько часов объявление считается свежим (7 суток)
 PER_CAT     = 2000       # потолок карточек на раздел
-MAX_PAGES   = 2          # сколько страниц раздела листать
+MAX_PAGES   = 20         # предохранитель по страницам раздела
 MAX_SECONDS = 15 * 60    # сколько секунд отдаём сбору, остальное — запас под потолок
 SAMPLE      = 3          # сколько карточек печатать в лог для проверки
 TEST        = False      # True -> ничего не отправлять, только показать разбор в логе
@@ -359,15 +363,19 @@ def item_data(sess, url, iid):
 # ---------- текст ----------
 
 def headline(sess, e, d):
-    src = scrub((e.get("title") or (d["title"] if d else "")).strip())
+    # сначала заголовок самой страницы объявления, потом карточка раздела
+    src = scrub(((d["title"] if d else "") or e.get("title") or "").strip())
     t = scrub(translate(sess, src).strip())
     if is_translit_hy(src) or is_translit_hy(t):
         return ""
-    if t and (has_cyr(t) or script(t) == "lat"):
+    # инфинитив вроде «Одеваться» заголовком не ставим
+    if t and not re.search(r"(?:ться|тись)$", t.lower()) and (has_cyr(t) or script(t) == "lat"):
         return " ".join(t.split())[:90]
     alt = scrub(translate(sess, d["desc"][:300]).strip()) if d else ""
     if has_cyr(alt) and len(alt.split()) >= 3:
-        return re.split(r"[.!?]\s", alt)[0].strip()[:90]
+        return " ".join(re.split(r"[.!?]\s", alt)[0].strip().split())[:90]
+    if t and (has_cyr(t) or script(t) == "lat"):
+        return " ".join(t.split())[:90]
     return " ".join((t or alt).split())[:90]
 
 def caption(sess, e, d):
@@ -463,7 +471,7 @@ def norm_queue(st):
     st["queue"] = q
 
 def collect(sess, slug, st, deadline):
-    """Карточки раздела, страница за страницей, пока идут новые и есть время."""
+    """Карточки раздела, пока идут новые и пока на странице есть свежее."""
     seen = {}
     for page in range(1, MAX_PAGES + 1):
         if time.time() > deadline:
@@ -475,13 +483,18 @@ def collect(sess, slug, st, deadline):
             break
         cards = card_scan(h, slug, PER_CAT)
         new = 0
+        fresh = 0
         for iid, c in cards.items():
             if iid not in seen:
                 seen[iid] = c
                 new += 1
-        print(f"  стр.{page}: карточек {len(cards)}, новых {new}")
+            if is_fresh(c["ts"]):
+                fresh += 1
+        print(f"  стр.{page}: карточек {len(cards)}, новых {new}, свежих {fresh}")
         if new == 0 or len(seen) >= PER_CAT:
             break
+        if fresh == 0 and page > 1:
+            break                      # дальше только старое
         time.sleep(1)
     return seen
 
@@ -593,7 +606,10 @@ def main():
     while len(st["queue"]) > QUEUE_MAX:
         st["queue"].pop(0)
 
-    # 4. если очередь была пуста и только что наполнилась — публикуем
+    # 4. перемешиваем, чтобы разделы шли вперемешку
+    random.shuffle(st["queue"])
+
+    # 5. если очередь была пуста и только что наполнилась — публикуем
     if done == 0 and st["queue"]:
         done += publish_phase(sess, st, time.time(), 1)
 
