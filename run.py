@@ -1,51 +1,29 @@
 # -*- coding: utf-8 -*-
 """
-Диспетчер: один запуск = один пост в «Барахолка Երևան».
+Запуск gortsarq.am -> «Барахолка Երևան».
 
-Два сайта, поровну по слотам (время Еревана):
-  чётный час:  :00 :30 -> ivi.am        :15 :45 -> gortsarq.am
-  нечётный час: :00 :30 -> gortsarq.am  :15 :45 -> ivi.am
+Один запуск = один пост. Расписание задаёт внешний таймер, он же вызывает
+этот workflow.
 
-Если у выбранного сайта свежего нет — слот забирает второй сайт.
-SOURCE=ivi|gortsarq (workflow_dispatch) — ручная проверка одного сайта.
-list.am из работы исключён.
+ivi.am из этого файла убран: у него своя ветка и свой отдельный запуск,
+держать оба сайта в одном процессе больше не нужно. Если у gortsarq.am
+свежего нет — слот остаётся пустым, второй сайт из этого запуска не
+подхватывает.
 """
-import os
 import importlib
-from datetime import datetime, timedelta, timezone
 
-TZ = timezone(timedelta(hours=4))          # Ереван
-SOURCE = os.environ.get("SOURCE", "").strip().lower()
-MODS = {"ivi": "ivi", "gortsarq": "gortsarq"}
-ALT = ("ivi", "gortsarq")
-
-def slot_source():
-    if SOURCE in MODS:
-        return SOURCE
-    now = datetime.now(TZ)
-    mins = (now.minute + 7) // 15 * 15     # округляем к ближайшему слоту
-    hour = now.hour + (1 if mins >= 60 else 0)
-    mins %= 60
-    return ALT[(mins // 15 + hour) % 2]
+MOD = "gortsarq"          # модуль, который запускаем
 
 def run(which):
     try:
-        m = importlib.import_module(MODS[which])
+        m = importlib.import_module(which)
         return int(m.main() or 0)
     except Exception as e:
         print(f"{which}: сбой {type(e).__name__}: {e}")
         return 0
 
 def main():
-    now = datetime.now(TZ)
-    want = slot_source()
-    print(f"слот {now:%H:%M} ({'ручной' if SOURCE in MODS else 'auto'}) -> {want}")
-
-    if run(want):
-        return
-
-    other = "gortsarq" if want == "ivi" else "ivi"
-    print(f"{want} пусто — пробуем {other}")
-    run(other)
+    print("запуск -> gortsarq")
+    return run(MOD)
 
 main()
