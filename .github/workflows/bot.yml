@@ -37,6 +37,7 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          JINA_KEY: ${{ secrets.JINA_KEY }}
           SOURCE: ${{ inputs.source }}
         run: python -c "import usercustomize, runpy; runpy.run_path('run.py', run_name='__main__')"
 
