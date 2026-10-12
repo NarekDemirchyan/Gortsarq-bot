@@ -1,16 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-Этот файл Python читает сам, при старте — подключать его никуда не нужно.
-Одна задача: убрать из альбома повтор одной и той же фотографии.
+Этот файл бот загружает первым (см. bot.yml), до остальной работы.
+Задача одна: в альбоме не должно быть одного и того же снимка дважды.
 
-list.am отдаёт одно и то же фото в разных размерах и форматах
-(f/220/99993220.webp и другой размер того же снимка). Бот собирает галерею
-по имени файла, поэтому такие пары попадают в альбом дважды. Здесь альбом
-пересобирается по номеру фотографии: повтор убирается, а из двух вариантов
-остаётся полный (папка f).
+list.am отдаёт одну фотографию в разных размерах и форматах, бот собирает
+галерею по имени файла и берёт обе. Здесь альбом пересобирается по номеру
+фотографии: повтор убирается, из вариантов остаётся полный (папка f).
 
-В логе видно строку «альбом: фото ...» — по ней понятно, что файл загрузился
-и как называются снимки. Всё обёрнуто в try: не вышло — запрос уходит как есть.
+Если после этого остаётся один снимок, альбом отправлять нельзя — Telegram
+принимает альбом от двух фото. Тогда снимок уходит обычным сообщением,
+а боту возвращается ответ об успехе: он продолжает как обычно и добавляет
+«Связаться с продавцом» и кнопку.
+
+Всё обёрнуто в try: не вышло — запрос уходит как есть.
 """
 import json
 import re
@@ -57,6 +59,40 @@ def _names(items):
             out.append(u.rsplit("/", 1)[-1] or u)
     return ", ".join(out)
 
+class _Answer(object):
+    """Ответ, который видит бот, когда снимок ушёл обычным сообщением."""
+
+    def __init__(self, code, text):
+        self.status_code = code
+        self.text = text
+
+    @property
+    def ok(self):
+        return 200 <= self.status_code < 300
+
+    def json(self):
+        return json.loads(self.text)
+
+def _one_photo(sess, old, url, data, one, timeout):
+    """Один снимок вместо альбома: обычное фото, а боту — ответ об успехе."""
+    place = url.replace("sendMediaGroup", "sendPhoto")
+    payload = {"chat_id": (data or {}).get("chat_id"),
+               "photo": one.get("media"),
+               "caption": one.get("caption") or ""}
+    r = old(sess, place, data=payload, timeout=timeout)
+    print("  альбом: один снимок -> sendPhoto", r.status_code)
+    if not r.ok:
+        return r
+    mid = None
+    try:
+        res = r.json().get("result") or {}
+        if isinstance(res, dict):
+            mid = res.get("message_id")
+    except Exception:
+        mid = None
+    body = json.dumps({"ok": True, "result": [{"message_id": mid}]})
+    return _Answer(200, body)
+
 def _patch():
     if requests is None:
         return
@@ -70,6 +106,9 @@ def _patch():
                 if isinstance(items, list):
                     print("  альбом: фото", len(items), "->", _names(items))
                     fixed = _clean(items)
+                    if len(fixed) == 1:
+                        return _one_photo(self, old, url, data, fixed[0],
+                                          kw.get("timeout", 60))
                     if len(fixed) != len(items):
                         print("  альбом: убрано повторов", len(items) - len(fixed))
                         data = dict(data, media=json.dumps(fixed, ensure_ascii=False))
