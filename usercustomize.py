@@ -4,11 +4,13 @@
 Одна задача: убрать из альбома повтор одной и той же фотографии.
 
 list.am отдаёт одно и то же фото в разных размерах и форматах
-(f/430/100011430.webp и s/430/100011430.jpg). Бот собирает галерею по имени
-файла, поэтому такие пары попадают в альбом дважды. Здесь альбом
+(f/220/99993220.webp и другой размер того же снимка). Бот собирает галерею
+по имени файла, поэтому такие пары попадают в альбом дважды. Здесь альбом
 пересобирается по номеру фотографии: повтор убирается, а из двух вариантов
 остаётся полный (папка f).
-Всё обёрнуто в try: если что-то не выйдет, запрос уходит как есть.
+
+В логе видно строку «альбом: фото ...» — по ней понятно, что файл загрузился
+и как называются снимки. Всё обёрнуто в try: не вышло — запрос уходит как есть.
 """
 import json
 import re
@@ -19,11 +21,11 @@ except Exception:
     requests = None
 
 def _key(u):
-    """Номер фотографии: .../f/430/100011430.webp -> 100011430"""
+    """Номер фотографии: любой из .../f/220/99993220.webp и его вариантов -> 99993220"""
     u = (u or "").split("?")[0]
     name = u.rsplit("/", 1)[-1].rsplit(".", 1)[0]
-    name = re.sub(r"[^0-9]+$", "", name)
-    return name or u
+    m = re.search(r"\d{5,}", name)
+    return m.group(0) if m else name or u
 
 def _full(u):
     return "/f/" in (u or "")
@@ -47,24 +49,32 @@ def _clean(media):
             out[i] = dict(item, caption=keep)
     return out
 
+def _names(items):
+    out = []
+    for it in items:
+        if isinstance(it, dict):
+            u = str(it.get("media") or "")
+            out.append(u.rsplit("/", 1)[-1] or u)
+    return ", ".join(out)
+
 def _patch():
     if requests is None:
         return
     old = requests.Session.post
 
     def post(self, url, data=None, json=None, **kw):
-        try:
-            if url and "sendMediaGroup" in str(url) and isinstance(data, dict):
-                raw = data.get("media")
-                if isinstance(raw, str):
-                    items = json.loads(raw)
-                    if isinstance(items, list) and len(items) > 1:
-                        fixed = _clean(items)
-                        if len(fixed) != len(items):
-                            print("  альбом: убрано повторов", len(items) - len(fixed))
-                            data = dict(data, media=json.dumps(fixed, ensure_ascii=False))
-        except Exception as e:
-            print("  альбом: правка не вышла:", type(e).__name__)
+        if url and "sendMediaGroup" in str(url):
+            try:
+                raw = (data or {}).get("media")
+                items = json.loads(raw) if isinstance(raw, str) else None
+                if isinstance(items, list):
+                    print("  альбом: фото", len(items), "->", _names(items))
+                    fixed = _clean(items)
+                    if len(fixed) != len(items):
+                        print("  альбом: убрано повторов", len(items) - len(fixed))
+                        data = dict(data, media=json.dumps(fixed, ensure_ascii=False))
+            except Exception as e:
+                print("  альбом: правка не вышла:", type(e).__name__)
         return old(self, url, data=data, json=json, **kw)
 
     requests.Session.post = post
