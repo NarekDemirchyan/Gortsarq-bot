@@ -10,6 +10,9 @@ gortsarq.am -> Telegram («Барахолка Երևան»).
 Заголовок и описание переводим на русский, не вышло — публикуем оригинал.
 Армянское слово латиницей («vacharum em heraxos») не публикуем, берём
 следующее. Фото — до 10, без фото объявление пропускаем.
+
+Знаки «<» и «>» в разборе страниц набраны кодом символа (GT): в переписке такие
+сочетания иногда съедаются, и регэксп остаётся пустым.
 """
 import os
 import re
@@ -19,6 +22,8 @@ import time
 import requests
 
 from fetcher import jina, translate, script, has_cyr, is_translit_hy, led_has, led_add
+
+GT = chr(62)
 
 TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -44,9 +49,9 @@ CATS = [
     "2328c-hobbi-hangist-ev-sport", # Հոբբի, հանգիստ և սպորտ
 ]
 
-ITEM_RE     = re.compile(r"""https://gortsarq\.am/ru/(\d+)p-[^)"'\s>]+""")
+ITEM_RE     = re.compile(r"""https://gortsarq\.am/ru/(\d+)p-[^)"'\s""" + GT + r"""]+""")
 ITEM_ID_RE  = re.compile(r"/(\d+)p-")
-PHOTO_RE    = re.compile(r"""https://gortsarq\.am/images/detailed/\d+/[^)"'\s>]+""")
+PHOTO_RE    = re.compile(r"""https://gortsarq\.am/images/detailed/\d+/[^)"'\s""" + GT + r"""]+""")
 DATE_RE     = re.compile(r"\d{2}\.\d{2}\.\d{4}")
 
 def last_days(n):
@@ -92,10 +97,12 @@ def item_data(sess, path):
     if m:
         title = m.group(1).strip()
 
+    # цена: в числе не бывает переноса строки, иначе к цене приклеится
+    # соседнее число со страницы («3» над ценой)
     price = ""
-    m = re.search(r"([\d][\d\s,\.]*)\s*(֏|\$|€)", md)
+    m = re.search(r"([\d][\d ,\.]*)\s*(֏|\$|€)", md)
     if m:
-        num = re.sub(r"[.,]00$", "", m.group(1).strip())
+        num = " ".join(re.sub(r"[.,]00$", "", m.group(1).strip()).split())
         if re.search(r"[1-9]", num):
             price = num + " " + m.group(2)
     if not price and "Договорная" in md:
@@ -109,7 +116,7 @@ def item_data(sess, path):
     place = ""
     m = re.search(r"Расположение\s*\n+(.+)", md)
     if m:
-        place = m.group(1).strip()[:60]
+        place = " ".join(m.group(1).split())[:60]
 
     photos = []
     for m in PHOTO_RE.finditer(md + "\n" + html):
@@ -125,11 +132,11 @@ def headline(sess, d):
     if is_translit_hy(src) or is_translit_hy(t):
         return ""
     if t and (has_cyr(t) or script(t) == "lat"):
-        return t[:90]
+        return " ".join(t.split())[:90]
     alt = translate(sess, d["desc"][:300]).strip()
     if has_cyr(alt) and len(alt.split()) >= 3:
         return re.split(r"[.!?]\s", alt)[0].strip()[:90]
-    return (t or alt)[:90]
+    return " ".join((t or alt).split())[:90]
 
 def make_caption(sess, d):
     head = headline(sess, d)
@@ -142,7 +149,9 @@ def make_caption(sess, d):
         lines.append(d["place"])
     if d["desc"]:
         lines.append(translate(sess, d["desc"][:700]))
-    return "\n\n".join(x for x in lines if x)[:1024]
+    # каждая часть — одной строкой: перевод и разбор иногда оставляют переносы
+    lines = [" ".join(x.split()) for x in lines if x]
+    return "\n\n".join(lines)[:1024]
 
 def send(sess, d, caption):
     markup = {"inline_keyboard": [[{"text": "Связаться", "url": d["url"]}]]}
