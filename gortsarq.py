@@ -1,23 +1,37 @@
 # -*- coding: utf-8 -*-
+"""
+gortsarq.am -> Telegram («Барахолка Երևան»).
+
+Один запуск = один пост (ритм задаёт run.py). Берём объявления за последние
+сутки по дате на карточке (ДД.ММ.ГГГГ). Каждый id выходит один раз: он идёт
+и в state-gortsarq.json, и в общую тетрадь published.json.
+
+Чтение и перевод — из fetcher.py (три ступени чтения, цепочка переводчиков).
+Заголовок и описание переводим на русский, не вышло — публикуем оригинал.
+Армянское слово латиницей («vacharum em heraxos») не публикуем, берём
+следующее. Фото — до 10, без фото объявление пропускаем.
+"""
 import os
 import re
 import json
 import time
+
 import requests
 
-TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+from fetcher import jina, translate, script, has_cyr, is_translit_hy, led_has, led_add
+
+TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-STATE = "state-gortsarq.json"
-INTERVAL = 25 * 60          # минимальный промежуток между публикациями (сек)
-QUEUE_MAX = 250             # максимум объявлений в очереди
+SITE       = "gortsarq"
+STATE      = "state-gortsarq.json"
+INTERVAL   = 0              # ритм задаёт расписание (run.py)
+QUEUE_MAX  = 250            # максимум объявлений в очереди
 FRESH_DAYS = 1              # берём только объявления за последние сутки
-RESET_ONCE = True           # однократный сброс очереди
-TEST = False
+RESET_ONCE = False          # однократный сброс очереди (уже сделан)
+TEST       = False
 
-JINA = "https://r.jina.ai/"
 BASE = "https://gortsarq.am"
-HDRS = {"User-Agent": "curl/8.5.0"}
 
 CATS = [
     "265c-2-ansharj-guyq",          # Անշարժ գույք
@@ -30,56 +44,10 @@ CATS = [
     "2328c-hobbi-hangist-ev-sport", # Հոբբի, հանգիստ և սպորտ
 ]
 
-ITEM_RE = re.compile(r"""https://gortsarq\.am/ru/(\d+)p-[^)"'\s>]+""")
-PHOTO_RE = re.compile(r"""https://gortsarq\.am/images/detailed/\d+/[^)"'\s>]+""")
-DATE_RE = re.compile(r"\d{2}\.\d{2}\.\d{4}")
-
-BLOCKED = ("just a moment", "attention required", "enable javascript",
-           "checking your browser", "cloudflare")
-
-def is_blocked(text):
-    t = (text or "").strip()
-    return len(t) < 800 or any(m in t.lower() for m in BLOCKED)
-
-def jina(sess, url, extra=None):
-    h = dict(HDRS)
-    if extra:
-        h.update(extra)
-    for attempt in range(2):
-        try:
-            r = sess.get(JINA + url, headers=h, timeout=60)
-            if r.status_code == 200 and not is_blocked(r.text):
-                return r.text
-            print(f" jina {r.status_code} / защита, попытка {attempt + 1}")
-        except Exception as e:
-            print(f" jina ошибка: {type(e).__name__}: {e}")
-        time.sleep(3 * (attempt + 1))
-    return ""
-
-def translate(sess, text):
-    text = (text or "").strip()
-    if not text:
-        return text
-    try:
-        r = sess.get("https://translate.googleapis.com/translate_a/single",
-                     params={"client": "gtx", "sl": "auto", "tl": "ru",
-                             "dt": "t", "q": text[:2000]}, timeout=30)
-        data = r.json()
-        res = "".join(p[0] for p in data[0] if p and p[0]).strip()
-        if res:
-            return res
-    except Exception as e:
-        print(" перевод недоступен:", type(e).__name__)
-    return text
-
-def has_cyr(s):
-    return bool(re.search(r"[А-Яа-яЁё]", s or ""))
-
-def latin_junk(t):
-    t = (t or "").strip()
-    if not t or has_cyr(t):
-        return False
-    return len(t.split()) > 2
+ITEM_RE     = re.compile(r"""https://gortsarq\.am/ru/(\d+)p-[^)"'\s>]+""")
+ITEM_ID_RE  = re.compile(r"/(\d+)p-")
+PHOTO_RE    = re.compile(r"""https://gortsarq\.am/images/detailed/\d+/[^)"'\s>]+""")
+DATE_RE     = re.compile(r"\d{2}\.\d{2}\.\d{4}")
 
 def last_days(n):
     # даты сайта (ДД.ММ.ГГГГ) за последние n суток по Еревану (UTC+4)
@@ -152,13 +120,16 @@ def item_data(sess, path):
             "place": place, "photos": photos[:10], "url": BASE + path}
 
 def headline(sess, d):
-    t = translate(sess, d["title"]).strip()
-    if t and not latin_junk(t):
-        return t
+    src = (d["title"] or "").strip()
+    t = translate(sess, src).strip()
+    if is_translit_hy(src) or is_translit_hy(t):
+        return ""
+    if t and (has_cyr(t) or script(t) == "lat"):
+        return t[:90]
     alt = translate(sess, d["desc"][:300]).strip()
     if has_cyr(alt) and len(alt.split()) >= 3:
         return re.split(r"[.!?]\s", alt)[0].strip()[:90]
-    return ""
+    return (t or alt)[:90]
 
 def make_caption(sess, d):
     head = headline(sess, d)
@@ -228,20 +199,38 @@ def send(sess, d, caption):
 
 def load():
     if os.path.exists(STATE):
-        return json.load(open(STATE, encoding="utf-8"))
+        try:
+            return json.load(open(STATE, encoding="utf-8"))
+        except Exception as e:
+            print("state-gortsarq.json не читается:", e)
     return {"seen": [], "queue": [], "last_publish": 0,
             "published": {}, "failed": {}}
 
 def save(st):
     json.dump(st, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
 
+def norm_queue(st):
+    """Очередь — словари {id, path}; старые строки-пути тоже принимаем."""
+    q = []
+    for e in st.get("queue", []):
+        if isinstance(e, dict) and e.get("path"):
+            iid = str(e.get("id") or "")
+            if not iid:
+                m = ITEM_ID_RE.search(e["path"])
+                iid = m.group(1) if m else e["path"]
+            q.append({"id": iid, "path": e["path"]})
+        elif isinstance(e, str):
+            m = ITEM_ID_RE.search(e)
+            q.append({"id": m.group(1) if m else e, "path": e})
+    st["queue"] = q
+
 def main():
     st = load()
     st.setdefault("failed", {})
     st.setdefault("seen", [])
-    st.setdefault("queue", [])
     st.setdefault("published", {})
     st.setdefault("last_publish", 0)
+    norm_queue(st)
     sess = requests.Session()
 
     if RESET_ONCE and not st.get("reset_done2"):
@@ -257,19 +246,20 @@ def main():
     if TEST:
         for iid, it in list(items.items())[:1]:
             d = item_data(sess, it["path"])
-            print("фото:", len(d["photos"]), "заголовок:", d["title"])
-            send(sess, d, make_caption(sess, d))
-        return
+            if d:
+                print("фото:", len(d["photos"]), "заголовок:", d["title"])
+        return 0
 
     ok_dates = last_days(FRESH_DAYS)
     fresh = []
     for iid, it in items.items():
-        if iid in st["seen"] or iid in st["published"] or it["path"] in st["published"]:
+        if (iid in st["seen"] or iid in st["published"]
+                or it["path"] in st["published"] or led_has(SITE, iid)):
             continue
         st["seen"].append(iid)
         if it["date"] and it["date"] not in ok_dates:
             continue                      # старше суток — не берём вовсе
-        fresh.append(it["path"])
+        fresh.append({"id": iid, "path": it["path"]})
 
     st["seen"] = st["seen"][-20000:]
 
@@ -283,31 +273,43 @@ def main():
     now = time.time()
     print("очередь:", len(st["queue"]))
 
+    done = 0
     if st["queue"] and now - st["last_publish"] >= INTERVAL:
         # до трёх попыток в одном слоте: если объявление не вышло,
         # сразу берём следующее из очереди, чтобы время не пропадало
         for _ in range(3):
-            if not st["queue"]:
+            if not st["queue"] or done >= 1:
                 break
-            path = st["queue"].pop(0)
+            e = st["queue"].pop(0)
+            iid, path = e["id"], e["path"]
+            if iid in st["published"] or path in st["published"] or led_has(SITE, iid):
+                continue
             ok = False
             try:
                 d = item_data(sess, path)
+                if d and not d["photos"]:
+                    print("  без фото, пропускаем:", iid)
+                    continue
                 cap = make_caption(sess, d) if d else ""
+                if d and not cap:
+                    print("  без заголовка (латиницей армянский или пусто), пропускаем:", iid)
+                    continue
                 ok = bool(cap) and bool(d["photos"]) and send(sess, d, cap)
-            except Exception as e:
-                print("ошибка публикации:", e)
+            except Exception as ex:
+                print("ошибка публикации:", ex)
                 ok = False
 
             if ok:
                 st["last_publish"] = now
                 st["published"][path] = now
-                print(f"опубликовано: {path}")
+                led_add(SITE, iid, now)
+                done += 1
+                print(f"опубликовано: {iid} ({path}) фото {len(d['photos'])}")
                 break
 
             st["failed"][path] = st["failed"].get(path, 0) + 1
             if st["failed"][path] < 2:
-                st["queue"].append(path)
+                st["queue"].append(e)
                 print(f"  вернём в конец очереди: {path}")
             else:
                 print(f"  брошен {path}: не удалось 2 раза")
@@ -317,7 +319,8 @@ def main():
         st["published"] = {k: st["published"][k] for k in keys}
 
     save(st)
+    print("готово, публикаций за запуск:", done)
+    return done
 
-from fetcher import jina, translate
-
-main()
+if __name__ == "__main__":
+    main()
