@@ -38,7 +38,7 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           SOURCE: ${{ inputs.source }}
-        run: python run.py
+        run: python -c "import usercustomize, runpy; runpy.run_path('run.py', run_name='__main__')"
 
       - name: Save state
         if: always()
