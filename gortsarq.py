@@ -5,8 +5,8 @@ gortsarq.am -> Telegram («Барахолка Երևան»).
 Как бот собирает объявление:
   1. Обходит разделы (CATS) и листает страницы раздела, пока идут новые
      карточки; потолок — PER_CAT ссылок на раздел.
-  2. Берёт объявления за последнюю неделю по дате на карточке
-     (ДД.ММ.ГГГГ).
+  2. Берёт объявления за последнюю неделю по дате на карточке (ДД.ММ.ГГГГ).
+     Объявление без даты считает сегодняшним.
   3. Открывает страницу объявления и берёт оттуда фотографии (до 10),
      заголовок, цену, место и описание.
   4. Публикует по одному объявлению за запуск: название, цена, место,
@@ -15,6 +15,8 @@ gortsarq.am -> Telegram («Барахолка Երևան»).
 Один id может выйти снова: если продавец обновил объявление позже, чем оно
 выходило в группе, оно публикуется заново. У gortsarq на карточке видна
 только дата, поэтому сравниваются даты, а не часы.
+
+Закрытые телефоны вида «(0x xxx xxxx)» из текста вырезаем.
 
 Чтение и перевод — из fetcher.py. Заголовок и описание переводим на русский,
 не вышло — публикуем оригинал. Армянское слово латиницей («vacharum em
@@ -61,13 +63,22 @@ CATS = [
     "2328c-hobbi-hangist-ev-sport", # Հոբբի, հանգիստ և սպորտ
 ]
 
-ITEM_RE     = re.compile(r"""https://gortsarq\.am/ru/(\d+)p-[^)"'\s""" + GT + r"""]+""")
-ITEM_ID_RE  = re.compile(r"/(\d+)p-")
-PHOTO_RE    = re.compile(r"""https://gortsarq\.am/images/detailed/\d+/[^)"'\s""" + GT + r"""]+""")
-DATE_RE     = re.compile(r"\d{2}\.\d{2}\.\d{4}")
+ITEM_RE    = re.compile(r"""https://gortsarq\.am/ru/(\d+)p-[^)\]\s"'""" + GT + r"""]+""")
+ITEM_ID_RE = re.compile(r"/(\d+)p-")
+PHOTO_RE   = re.compile(r"""https://gortsarq\.am/images/detailed/\d+/[^)\]\s"'""" + GT + r"""]+""")
+DATE_RE    = re.compile(r"\d{2}\.\d{2}\.\d{4}")
+
+# закрытый телефон: (0x xxx xxxx) и любые похожие наборы «x»
+MASK_RE    = re.compile(r"\(?\s*0?\s*x{2,}[\s\-x]*x{2,}\s*\)?", re.I)
+
+def today_str():
+    return time.strftime("%d.%m.%Y", time.gmtime(time.time() + 4 * 3600))
+
+def scrub(text):
+    """Убираем закрытые телефоны и лишние пробелы."""
+    return " ".join(MASK_RE.sub(" ", text or "").split())
 
 def last_days(n):
-    # даты сайта (ДД.ММ.ГГГГ) за последние n суток по Еревану (UTC+4)
     out = set()
     base = time.time() + 4 * 3600
     for k in range(n + 1):
@@ -89,7 +100,7 @@ def get_items(sess):
             n = 0
             for m in ITEM_RE.finditer(md):
                 iid = m.group(1)
-                path = m.group(0)[len("https://gortsarq.am"):]
+                path = m.group(0)[len(BASE):].split("]")[0].split(")")[0]
                 tail = md[m.end():m.end() + 300]
                 d = DATE_RE.search(tail)
                 date = d.group(0) if d else ""
@@ -118,10 +129,8 @@ def item_data(sess, path):
     title = ""
     m = re.search(r"^#{1,3}\s+(.+)$", md, re.M)
     if m:
-        title = m.group(1).strip()
+        title = scrub(m.group(1).strip())
 
-    # цена: в числе не бывает переноса строки, иначе к цене приклеится
-    # соседнее число со страницы («3» над ценой)
     price = ""
     m = re.search(r"([\d][\d ,\.]*)\s*(֏|\$|€)", md)
     if m:
@@ -134,7 +143,7 @@ def item_data(sess, path):
     desc = ""
     m = re.search(r"Описание\s*\n+(.+?)\n+\d{2}\.\d{2}\.\d{4}", md, re.S)
     if m:
-        desc = " ".join(m.group(1).split())
+        desc = scrub(" ".join(m.group(1).split()))
 
     place = ""
     m = re.search(r"Расположение\s*\n+(.+)", md)
@@ -143,20 +152,21 @@ def item_data(sess, path):
 
     photos = []
     for m in PHOTO_RE.finditer(md + "\n" + html):
-        if m.group(0) not in photos:
-            photos.append(m.group(0))
+        u = m.group(0).split("]")[0].split(")")[0]
+        if u not in photos:
+            photos.append(u)
 
     return {"title": title, "price": price, "desc": desc,
             "place": place, "photos": photos[:10], "url": BASE + path}
 
 def headline(sess, d):
-    src = (d["title"] or "").strip()
-    t = translate(sess, src).strip()
+    src = scrub((d["title"] or "").strip())
+    t = scrub(translate(sess, src).strip())
     if is_translit_hy(src) or is_translit_hy(t):
         return ""
     if t and (has_cyr(t) or script(t) == "lat"):
         return " ".join(t.split())[:90]
-    alt = translate(sess, d["desc"][:300]).strip()
+    alt = scrub(translate(sess, d["desc"][:300]).strip())
     if has_cyr(alt) and len(alt.split()) >= 3:
         return re.split(r"[.!?]\s", alt)[0].strip()[:90]
     return " ".join((t or alt).split())[:90]
@@ -171,9 +181,8 @@ def make_caption(sess, d):
     if d["place"]:
         lines.append(d["place"])
     if d["desc"]:
-        lines.append(translate(sess, d["desc"][:700]))
-    # каждая часть — одной строкой: перевод и разбор иногда оставляют переносы
-    lines = [" ".join(x.split()) for x in lines if x]
+        lines.append(scrub(translate(sess, d["desc"][:700])))
+    lines = [" ".join(scrub(x).split()) for x in lines if x]
     return "\n\n".join(lines)[:1024]
 
 def send(sess, d, caption):
@@ -245,14 +254,16 @@ def norm_queue(st):
     q = []
     for e in st.get("queue", []):
         if isinstance(e, dict) and e.get("path"):
+            p = str(e["path"]).split("]")[0].split(")")[0]
             iid = str(e.get("id") or "")
             if not iid:
-                m = ITEM_ID_RE.search(e["path"])
-                iid = m.group(1) if m else e["path"]
-            q.append({"id": iid, "path": e["path"], "date": e.get("date", "")})
+                m = ITEM_ID_RE.search(p)
+                iid = m.group(1) if m else p
+            q.append({"id": iid, "path": p, "date": e.get("date", "")})
         elif isinstance(e, str):
-            m = ITEM_ID_RE.search(e)
-            q.append({"id": m.group(1) if m else e, "path": e, "date": ""})
+            p = e.split("]")[0].split(")")[0]
+            m = ITEM_ID_RE.search(p)
+            q.append({"id": m.group(1) if m else p, "path": p, "date": ""})
     st["queue"] = q
 
 def norm_published(st):
@@ -291,7 +302,9 @@ def main():
     ok_dates = last_days(FRESH_DAYS)
     fresh = []
     for iid, it in items.items():
-        if it["date"] and it["date"] not in ok_dates:
+        if not it["date"]:
+            it["date"] = today_str()      # без даты на карточке считаем сегодняшним
+        if it["date"] not in ok_dates:
             continue                      # старше недели — не берём вовсе
         if st["published"].get(it["path"]) == it["date"]:
             continue                      # выходило с этой же датой обновления
@@ -300,17 +313,14 @@ def main():
     if fresh:
         st["queue"].extend(fresh)
         print("новых в очередь:", len(fresh))
-        # лишнее уходит с начала очереди, свежие остаются в конце
         while len(st["queue"]) > QUEUE_MAX:
             st["queue"].pop(0)
 
     now = time.time()
-    print("очередь:", len(st["queue"]))
+    print("свежих за неделю:", len(fresh), "| очередь:", len(st["queue"]))
 
     done = 0
     if st["queue"] and now - st["last_publish"] >= INTERVAL:
-        # до трёх попыток в одном слоте: если объявление не вышло,
-        # сразу берём следующее из очереди, чтобы время не пропадало
         for _ in range(3):
             if not st["queue"] or done >= 1:
                 break
@@ -336,8 +346,7 @@ def main():
 
             if ok:
                 st["last_publish"] = now
-                st["published"][path] = e.get("date") or time.strftime(
-                    "%d.%m.%Y", time.gmtime(now + 4 * 3600))
+                st["published"][path] = e.get("date") or today_str()
                 led_add(SITE, iid, now)
                 done += 1
                 print(f"опубликовано: {iid} ({path}) фото {len(d['photos'])}")
@@ -355,7 +364,9 @@ def main():
         st["published"] = {k: st["published"][k] for k in keys}
 
     save(st)
-    print("готово, публикаций за запуск:", done)
+    today = today_str()
+    n_today = sum(1 for v in st["published"].values() if str(v) == today)
+    print(f"готово, публикаций за запуск: {done} | сегодня всего: {n_today}")
     return done
 
 if __name__ == "__main__":
