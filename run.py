@@ -2,13 +2,14 @@
 """
 Диспетчер: один запуск = один пост в «Барахолка Երևան».
 
-Ритм 15 минут (время Еревана):
-  :00 :15 :30  -> list.am
-  :45          -> ivi.am в чётные часы, gortsarq.am в нечётные
+Сайт list.am из работы убран: он закрывает облачные адреса.
+Работают два сайта, и они чередуются по слотам (время Еревана):
+  :00 :15 :30 :45 -> ivi.am, gortsarq.am, ivi.am, gortsarq.am и так далее
 
-Если у выбранного сайта свежего нет — слот забирает list.am.
-Если и у list.am пусто — пробуем ivi, затем gortsarq.
-SOURCE=list|ivi|gortsarq (workflow_dispatch) — ручная проверка одного сайта.
+Если у выбранного сайта свежего нет — пробуем второй сайт.
+SOURCE=ivi|gortsarq (workflow_dispatch) — ручная проверка одного сайта.
+Очередь list.am остаётся в state.json нетронутой: если когда-нибудь
+захочется вернуть его в работу, там всё на месте.
 """
 import os
 import importlib
@@ -16,7 +17,8 @@ from datetime import datetime, timedelta, timezone
 
 TZ = timezone(timedelta(hours=4))          # Ереван
 SOURCE = os.environ.get("SOURCE", "").strip().lower()
-MODS = {"list": "bot", "ivi": "ivi", "gortsarq": "gortsarq"}
+MODS = {"ivi": "ivi", "gortsarq": "gortsarq"}
+ALT = ("ivi", "gortsarq")
 
 def slot_source():
     if SOURCE in MODS:
@@ -25,9 +27,7 @@ def slot_source():
     mins = (now.minute + 7) // 15 * 15     # округляем к ближайшему слоту
     hour = now.hour + (1 if mins >= 60 else 0)
     mins %= 60
-    if mins == 45:
-        return "ivi" if hour % 2 == 0 else "gortsarq"
-    return "list"
+    return ALT[(mins // 15 + hour) % 2]
 
 def run(which):
     try:
@@ -47,7 +47,7 @@ def main():
     if done:
         return
 
-    for alt in ("list", "ivi", "gortsarq"):
+    for alt in ALT:
         if alt == want:
             continue
         print(f"{want} пусто — пробуем {alt}")
@@ -55,6 +55,6 @@ def main():
         print(f"{alt}: опубликовано {done}")
         if done:
             return
-    print("во всех трёх сайтах нечего публиковать")
+    print("в двух сайтах нечего публиковать")
 
 main()
