@@ -2,22 +2,23 @@
 """
 ivi.am -> Telegram («Барахолка Երևան»).
 
-Один запуск = один пост (ритм задаёт run.py). Публикуем объявления,
-обновлённые продавцом за последнюю неделю (FRESH_H = 168): «Сегодня 19:03»,
-«Вчера 22:10», «11.10.2026», «11 октября». Объявление 2023 года,
-обновлённое вчера, — свежее.
+Как бот собирает объявление:
+  1. Обходит разделы (SECTIONS) и листает страницы раздела, пока идут новые
+     карточки; потолок — PER_CAT карточек на раздел.
+  2. С карточки берёт номер, ссылку, название, цену, место и строку
+     «Обновлено». Свежими считает обновлённые за последние FRESH_H часов.
+  3. Открывает страницу объявления и берёт оттуда галерею фотографий (до 10)
+     и описание.
+  4. Публикует по одному объявлению за запуск: название, цена, место,
+     описание и кнопка «Связаться».
 
 Один id может выйти снова: если продавец обновил объявление позже, чем оно
-выходило в группе, оно публикуется заново. Сравнивается не id, а время
-обновления с временем нашей публикации.
-
-Раздел смотрим до PER_CAT карточек — потолок 2000.
+выходило в группе, оно публикуется заново. Сравнивается время обновления
+с временем нашей публикации, а не один только id.
 
 Заголовок и описание переводим на русский (цепочка в fetcher.py); не вышло —
 публикуем оригинал. Армянское слово латиницей («vacharum em heraxos») не
-публикуем, берём следующее. Фото — до 10, без фото объявление пропускаем.
-Название, цена и место берутся из карточки раздела, фото — только этого
-объявления, описание — из блока после строки «N <id>».
+публикуем, берём следующее. Без фото объявление пропускаем.
 
 Знаки «<» и «>» в разборе страниц набраны кодом символа: в переписке такие
 сочетания иногда съедаются, и регэксп остаётся пустым.
@@ -45,7 +46,8 @@ INTERVAL    = 0          # ритм задаёт расписание (run.py)
 PUBLISH_MAX = 1          # публикаций за один запуск
 QUEUE_MAX   = 2000       # предел очереди
 FRESH_H     = 168        # сколько часов объявление считается свежим (7 суток)
-PER_CAT     = 2000       # потолок карточек в разделе
+PER_CAT     = 2000       # потолок карточек на раздел
+MAX_PAGES   = 10         # сколько страниц раздела листать
 SAMPLE      = 3          # сколько карточек печатать в лог для проверки
 TEST        = False      # True -> ничего не отправлять, только показать разбор в логе
 
@@ -78,6 +80,7 @@ HDRS = {
 }
 
 LINK_RE  = re.compile(r"/ru/item/([a-z0-9][a-z0-9\-]*?)-(\d{1,12})\.html", re.I)
+IMG_RE   = re.compile(r'(?:src|data-src|data-original|data-lazy)="([^"]+\.(?:jpg|jpeg|png|webp))"', re.I)
 PRICE_RE = re.compile(r"(\d[\d\s]{0,12})\s*(֏|\$|€|₽)")
 UPD_RE   = re.compile(r"(?:Обновлено|Թարմացվել է)\s*:?\s*([^|]{1,40})")
 REL_RE   = re.compile(r"([^|]{0,20}(?:Сегодня|Вчера|այսօր|երեկ)\s+\d{1,2}:\d{2})")
@@ -85,18 +88,21 @@ TITLE_RE = re.compile(r'title="([^"]{2,120})"')
 MONTHS   = {"янв": 1, "фев": 2, "мар": 3, "апр": 4, "май": 5, "мая": 5, "июн": 6,
             "июл": 7, "авг": 8, "сен": 9, "окт": 10, "ноя": 11, "дек": 12}
 
+# что обрезаем на странице объявления: чужие и похожие объявления
+CUT_AT = ("Похожие", "Другие объявления", "Последние Обявления",
+          "Նման", "Այլ հայտարար")
+
 # служебные фразы сайта, которые не должны попадать в описание
 JUNK = ("вход", "добавить объявлен", "мой профиль", "մուտք", "ավելացնել հայտարար",
         "премиум", "premium", "vip", "избранное", "все объявлен", "показать телефон",
         "написать продавцу", "сообщить", "жалоб", "наверх", "facebook", "հավանել",
-        "тэг", "регион", "категор", "today", "հայտարարություն")
+        "тэг", "регион", "категор", "today", "հայտարարություն",
+        "состояние", "վիճակ", "просмотр", "դիտում", "комментар", "մեկնաբան",
+        "поделиться", "կիսվել")
 
-def photo_re(iid):
-    """Ссылки на фото только этого объявления: имя файла начинается с его id."""
-    return re.compile(
-        r'(?:src|data-src|data-original|data-lazy)="'
-        r'([^"]*?/files/images/items/\d+/' + str(iid) +
-        r'[0-9a-z]*\.(?:jpg|jpeg|png|webp))"', re.I)
+# картинки, которые к объявлению не относятся
+BAD_IMG = ("logo", "avatar", "icon", "sprite", "social", "flag", "banner",
+           "brand", "noimage", "no-image", "placeholder", "loading")
 
 # ---------- сеть ----------
 
@@ -133,6 +139,22 @@ def find_price(txt):
         return ""
     return " ".join(m.group(1).split()) + " " + m.group(2)
 
+def gallery(h):
+    """Все фотографии объявления по порядку, без логотипов и служебных картинок."""
+    out = []
+    for m in IMG_RE.finditer(h or ""):
+        u = htmllib.unescape(m.group(1))
+        if u.startswith("//"):
+            u = "https:" + u
+        elif u.startswith("/"):
+            u = BASE + u
+        low = u.lower()
+        if any(bad in low for bad in BAD_IMG):
+            continue
+        if u not in out:
+            out.append(u)
+    return out
+
 def clean_desc(text, limit=700):
     parts = [p.strip(" |·—") for p in re.split(r"\s*\|\s*|" + LT + r"br\s*/?" + GT, text or "")]
     keep = []
@@ -144,6 +166,23 @@ def clean_desc(text, limit=700):
             continue
         keep.append(p)
     return " ".join(keep)[:limit]
+
+def desc_reserve(txt, limit=700):
+    """Запасной путь: служебные фразы вырезаем по одной, а не целым куском."""
+    tail = txt or ""
+    for key in ("Состояние", "Վիճակ", "Просмотр", "Դիտում"):
+        k = tail.find(key)
+        if k > 0:
+            tail = tail[k:]
+            break
+    low = tail.lower()
+    for j in JUNK:
+        i = low.find(j)
+        while i >= 0:
+            tail = tail[:i] + " " + tail[i + len(j):]
+            low = tail.lower()
+            i = low.find(j)
+    return " ".join(tail.split())[:limit]
 
 def parse_updated(s):
     """'Сегодня 19:03' / 'Вчера 22:10' / '11 октября' / '11.10.2026' -> unix-время."""
@@ -208,7 +247,7 @@ def card_scan(h, slug, limit):
         mu = UPD_RE.search(txt) or REL_RE.search(txt)
         upd = mu.group(1).strip(" |·—") if mu else ""
         mt = TITLE_RE.search(win)
-        ph = photo_re(iid).search(win)
+        ph = gallery(win)
         out[iid] = {
             "id": iid,
             "url": url,
@@ -216,29 +255,24 @@ def card_scan(h, slug, limit):
             "price": find_price(txt),
             "updated_txt": upd,
             "ts": parse_updated(upd),
-            "photo": ph.group(1) if ph else "",
+            "photo": ph[0] if ph else "",
         }
         if len(out) >= limit:
             break
     return out
 
 def item_data(sess, url, iid):
-    """Фото и описание объявления. Название и цену даёт карточка раздела."""
+    """Фото и описание объявления. Название, цену и место даёт карточка раздела."""
     h = fetch(sess, url)
     if not h:
         return None
-    for tail in ("Похожие", "Последние Обявления", "Նման", "Այլ հայտարարություններ"):
+    for tail in CUT_AT:
         cut = h.find(tail)
         if cut > 0:
             h = h[:cut]
             break
 
-    photos = []
-    for u in photo_re(iid).findall(h):
-        if u.startswith("//"):
-            u = "https:" + u
-        if u not in photos:
-            photos.append(u)
+    photos = gallery(h)
     if not photos:
         m = re.search(r'property="og:image"\s+content="([^"]+)"', h, re.I)
         if m:
@@ -251,9 +285,14 @@ def item_data(sess, url, iid):
     if m:
         title = plain(m.group(1))
 
-    # цена — только из шапки объявления, до строки «... | N <id>»
-    mi = re.search(r"\|\s*N\s*" + str(iid), txt)
+    # номер объявления ищем тремя способами: «| N <id>», «N <id>», «N: <id>»
+    mi = None
+    for pat in (r"\|\s*N\s*" + str(iid), r"\bN\s*" + str(iid), r"N\s*[:№]?\s*" + str(iid)):
+        mi = re.search(pat, txt)
+        if mi:
+            break
     head_zone = txt[:mi.start()] if mi else txt[:1500]
+
     price = find_price(head_zone)
 
     place = ""
@@ -261,11 +300,12 @@ def item_data(sess, url, iid):
     if m:
         place = re.sub(r"\s+", " ", m.group(1)).strip(" ,")
 
-    # описание — от строки «| N <id>» до конца, без служебных фраз
     desc = clean_desc(txt[mi.end():]) if mi else ""
+    if len(desc) < 20:
+        desc = desc_reserve(txt)
 
     print(f"  {iid}: фото {len(photos)}, цена «{price}», место «{place}», "
-          f"описание {len(desc)} знаков")
+          f"описание {len(desc)} знаков, блок {'найден' if mi else 'не найден'}")
     return {"title": title, "price": price, "place": place,
             "desc": desc, "photos": photos[:10], "url": url}
 
@@ -277,11 +317,11 @@ def headline(sess, e, d):
     if is_translit_hy(src) or is_translit_hy(t):
         return ""
     if t and (has_cyr(t) or script(t) == "lat"):
-        return t[:90]
+        return " ".join(t.split())[:90]
     alt = translate(sess, d["desc"][:300]).strip() if d else ""
     if has_cyr(alt) and len(alt.split()) >= 3:
         return re.split(r"[.!?]\s", alt)[0].strip()[:90]
-    return (t or alt)[:90]
+    return " ".join((t or alt).split())[:90]
 
 def caption(sess, e, d):
     head = headline(sess, e, d)
@@ -372,6 +412,26 @@ def norm_queue(st):
                       "title": "", "price": ""})
     st["queue"] = q
 
+def collect(sess, slug, st):
+    """Все карточки раздела, страница за страницей, пока идут новые."""
+    seen = {}
+    for page in range(1, MAX_PAGES + 1):
+        url = f"{BASE}/ru/search/{slug}/" if page == 1 else f"{BASE}/ru/search/{slug}/?page={page}"
+        h = fetch(sess, url)
+        if not h:
+            break
+        cards = card_scan(h, slug, PER_CAT)
+        new = 0
+        for iid, c in cards.items():
+            if iid not in seen:
+                seen[iid] = c
+                new += 1
+        print(f"  стр.{page}: карточек {len(cards)}, новых {new}")
+        if new == 0 or len(seen) >= PER_CAT:
+            break
+        time.sleep(1)
+    return seen
+
 def main():
     if not TOKEN or not CHAT_ID:
         print("нет TELEGRAM_TOKEN / TELEGRAM_CHAT_ID")
@@ -388,8 +448,7 @@ def main():
 
     # 1. все объявления, обновлённые за последнюю неделю
     for slug, name in SECTIONS.items():
-        h = fetch(sess, f"{BASE}/ru/search/{slug}/")
-        cards = card_scan(h, slug, PER_CAT)
+        cards = collect(sess, slug, st)
         fresh = [c for c in cards.values() if is_fresh(c["ts"])]
         print(f"[{slug}] {name}: карточек {len(cards)}, свежих за {FRESH_H}ч {len(fresh)}")
         for c in list(cards.values())[:SAMPLE]:
