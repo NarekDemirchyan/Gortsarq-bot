@@ -30,7 +30,7 @@ jobs:
 
       - name: Install
         run: |
-          pip install --quiet requests playwright
+          pip install --quiet requests cloudscraper playwright
           python -m playwright install --with-deps chromium
 
       - name: Run bot
