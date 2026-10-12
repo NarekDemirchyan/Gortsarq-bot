@@ -1,258 +1,273 @@
 # -*- coding: utf-8 -*-
-# fetcher.py — ընդհանուր ընթերցիչ (list.am, gortsarq.am և այլն) + ընդհանուր թարգմանիչ
-# Ընթերցում՝ 1) ուղիղ requests 2) r.jina.ai (browser, ապա առանց browser-ի) 3) պրոքսի։
-# jina() վերադարձնում է նույն markdown-ը, ինչ r.jina.ai-ն, որպեսզի
-# bot.py / gortsarq.py / arenda.py-ի պարսերները մնան անփոփոխ։
-# x-respond-with: html դեպքում վերադարձվում է չմշակված HTML։
+"""
+Общий модуль: чтение страниц, перевод и общая тетрадь публикаций.
 
-import os
+Чтение в три ступени (что первое ответит — то и берём):
+  1) r.jina.ai, движок browser — отдаёт markdown, под который написаны парсеры;
+  2) прямой requests с браузерными заголовками — HTML переводим в тот же markdown;
+  3) открытые прокси (allorigins, codetabs) — тоже HTML -> markdown.
+Пустая строка значит «не прочиталось»; вызывающий сам решает, что делать.
+
+Перевод: только армянский текст, цепочкой google -> clients5 -> mymemory.
+Все отказали — возвращаем оригинал. Наружу модуль исключений не бросает.
+
+published.json — общая тетрадь всех трёх сайтов: "list-22090629", "ivi-24081",
+"gorts-2929". Проверка и запись — led_has() / led_add().
+"""
 import re
+import json
 import time
-import requests
-from urllib.parse import quote, urljoin
+import html as htmllib
 
 JINA = "https://r.jina.ai/"
-JINA_KEY = os.environ.get("JINA_KEY", "")
+LEDGER = "published.json"
+
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
+      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+HDRS = {
+    "User-Agent": UA,
+    "Accept-Language": "ru,hy;q=0.9,en;q=0.8",
+}
 
-HARD_BLOCK = ("just a moment", "performing security verification",
-              "attention required", "checking your browser")
+PROXIES = ("https://api.allorigins.win/raw", "https://api.codetabs.com/v1/proxy")
 
-PROXIES = (
-    "https://api.allorigins.win/raw?url=",
-    "https://api.codetabs.com/v1/proxy?quest=",
-)
+BLOCKED = ("just a moment", "attention required", "enable javascript",
+           "checking your browser", "cloudflare", "performing security verification",
+           "captcha", "are you a human")
 
-IMG_JUNK = ("list.am/img/", "gortsarq.am/img/", "/icons/", "flag_", "logo", "sprite", "/static/")
+HY_RE  = re.compile(r"[\u0530-\u058F]")
+CYR_RE = re.compile(r"[А-Яа-яЁё]")
+LAT_RE = re.compile(r"[A-Za-z]")
+
+# армянский, набранный латиницей: «vacharum em heraxos» — такое не публикуем
+TRANSLIT_HY = ("vachar", "vacharv", "vacharum", "vacharq", "vcharjum", "vjarjum",
+               "himnakanum", "hnaravor", "ogtagvats", "artadr", "andznakan",
+               "heraxos", "axos", "nyuter", "nver", "giny", "gumar", "deq",
+               "tuft", "pahpan", "hatov", "shukay", "vernagir", "tesak", "guyn",
+               "em", "es", "e", "en", "its", "ic", "ev", "kam", "vor", "ayn",
+               "ayl", "shat", "lav", "voch", "nor", "erb", "inch", "mek",
+               "inchpes", "vorpes", "mijoc")
 
 def is_blocked(text):
     t = (text or "").strip()
     if len(t) < 800:
         return True
     low = t.lower()
-    return any(m in low for m in HARD_BLOCK)
+    return any(m in low for m in BLOCKED)
 
-def _unesc(s):
-    s = s or ""
-    for a, b in (("&amp;", "&"), ("&quot;", '"'), ("&#39;", "'"), ("&apos;", "'"),
-                 ("&lt;", "<"), ("&gt;", ">"), ("&nbsp;", " "),
-                 ("&laquo;", "«"), ("&raquo;", "»")):
-        s = s.replace(a, b)
-    return s
+def has_hy(s):
+    return bool(HY_RE.search(s or ""))
 
-def _base_of(url):
-    parts = url.split("/")
-    return "/".join(parts[:3]) if len(parts) >= 3 else url
+def has_cyr(s):
+    return bool(CYR_RE.search(s or ""))
 
-def _metas(h):
-    out = {}
-    for tag in re.findall(r"(?is)<meta\b[^>]*>", h or ""):
-        k = re.search(r'(?is)(?:property|name)\s*=\s*["\']([^"\']+)["\']', tag)
-        v = re.search(r'(?is)content\s*=\s*["\'](.*?)["\']', tag)
-        if k and v:
-            out.setdefault(k.group(1).strip().lower(), _unesc(v.group(1)).strip())
-    return out
+def has_lat(s):
+    return bool(LAT_RE.search(s or ""))
 
-def _strip_tags(t):
-    t = re.sub(r"(?is)<(script|style|noscript|svg|head)\b[^>]*>.*?</\1>", " ", t or "")
-    t = re.sub(r"(?is)<br\s*/?>", "\n", t)
-    t = re.sub(r"(?is)</(p|div|li|tr|h[1-6]|section|article|span)>", "\n", t)
-    t = re.sub(r"(?s)<[^>]+>", " ", t)
-    t = _unesc(t)
-    t = re.sub(r"[ \t\r\f\v]+", " ", t)
-    t = re.sub(r"\n[ \t]+", "\n", t)
-    t = re.sub(r"\n{2,}", "\n\n", t)
-    return t.strip()
+def script(s):
+    """hy — армянский, ru — кириллица, lat — латиница, none — ни одного."""
+    if has_hy(s):
+        return "hy"
+    if has_cyr(s):
+        return "ru"
+    if has_lat(s):
+        return "lat"
+    return "none"
 
-def _links_md(h, base):
-    def a(m):
-        href = urljoin(base, _unesc(m.group(1)).strip())
-        txt = " ".join(_strip_tags(m.group(2)).split()) or href
-        return "\n[%s](%s)\n" % (txt, href)
-    return re.sub(r'(?is)<a\b[^>]*href\s*=\s*["\']([^"\']+)["\'][^>]*>(.*?)</a>', a, h or "")
+def is_translit_hy(t):
+    """Армянское слово латиницей («vacharum em heraxos») — не публикуем.
+    Латинский бренд («Adidas Lightblaze») под правило не попадает."""
+    t = (t or "").lower()
+    if not t or has_hy(t) or has_cyr(t):
+        return False
+    words = re.findall(r"[a-z']{2,}", t)
+    if not words:
+        return False
+    hit = 0
+    for w in words:
+        for m in TRANSLIT_HY:
+            if len(m) <= 2:
+                if w == m:
+                    hit += 1
+                    break
+            elif w.startswith(m) or (len(m) >= 4 and m in w):
+                hit += 1
+                break
+    if hit == 0:
+        return False
+    if hit >= 2 and hit / len(words) >= 0.3:
+        return True
+    return len(words) >= 3 and hit / len(words) >= 0.4
 
-def _imgs(h, base):
-    urls = []
-    for m in re.finditer(r'(?is)<img\b[^>]*?(?:data-src|data-original|src)\s*=\s*["\']([^"\']+)["\']', h or ""):
-        u = urljoin(base, _unesc(m.group(1)).strip())
-        if re.search(r"\.(?:jpe?g|png|webp)(?:\?|$)", u, re.I) and u not in urls:
-            urls.append(u)
-    return urls
+# ---------- HTML -> тот же markdown, что отдаёт jina ----------
 
-def to_md(html, url):
-    base = _base_of(url)
-    meta = _metas(html)
-    text = _strip_tags(_links_md(html, base))
+def _attr(tag, name):
+    m = re.search(r"\b" + name + r"\s*=\s*[\"']([^\"']*)[\"']", tag or "", re.I)
+    return m.group(1).strip() if m else ""
 
-    title = meta.get("og:title") or meta.get("twitter:title") or ""
-    if not title:
-        m = re.search(r"(?is)<title[^>]*>(.*?)</title>", html or "")
-        title = _strip_tags(m.group(1)) if m else ""
-    title = re.sub(r"\s*[-–—|]\s*(list\.am|gortsarq\.am).*$", "", title, flags=re.I).strip()
-    if not title:
-        m = re.search(r"(?is)<h1\b[^>]*>(.*?)</h1>", html or "")
-        title = _strip_tags(m.group(1)) if m else ""
+def _abs(u, base):
+    u = htmllib.unescape(u or "").strip()
+    if u.startswith("//"):
+        return "https:" + u
+    if u.startswith("/"):
+        return (base or "").rstrip("/") + u
+    return u
 
-    desc = meta.get("og:description") or ""
-    if len(desc) < 40 or re.search(r"(list\.am|gortsarq)", desc, re.I):
-        paras = [p for p in text.split("\n")
-                 if 120 <= len(p) <= 900 and len(p.split()) >= 18]
-        if paras:
-            desc = max(paras, key=len)
+def _plain(h):
+    return " ".join(htmllib.unescape(re.sub(r"<[^>]+>", " ", h or "")).split())
 
-    price = ""
-    m = re.search(r"(\d[\d\s,\.]{0,15}?)\s*(֏|\$|€)", text)
-    if m:
-        price = re.sub(r"[.,]00$", "", m.group(1).strip()) + " " + m.group(2)
+def to_md(h, base=""):
+    h = re.sub(r"<(script|style|noscript)[^>]*>.*?</\1>", " ", h or "", flags=re.S | re.I)
+    h = re.sub(r"<!--.*?-->", " ", h, flags=re.S)
 
-    place = ""
-    m = re.search(r"([Ա-ՖA-ZА-ЯЁ][^›\n]{1,30}?)\s*›\s*([^›\n]{1,30})", text)
-    if m:
-        place = m.group(1).strip() + " › " + m.group(2).strip()
+    def _img(m):
+        tag = m.group(0)
+        src = (_attr(tag, "src") or _attr(tag, "data-src") or
+               _attr(tag, "data-original") or _attr(tag, "data-lazy"))
+        if not src or src.startswith("data:"):
+            return " "
+        return "\n![%s](%s)\n" % (_attr(tag, "alt"), _abs(src, base))
 
-    date = ""
-    m = re.search(r"\d{2}\.\d{2}\.\d{4}", text)
-    if m:
-        date = m.group(0)
+    def _a(m):
+        tag, text = m.group(0), _plain(m.group(1))
+        href = _attr(tag, "href")
+        return "[%s](%s)" % (text, _abs(href, base)) if href else text
 
-    out = []
-    if title:
-        out.append("# " + title)
-    if place:
-        out.append("[%s](%s)" % (place, url))
-    if price:
-        out.append(price)
-    out.append("Описание *")
-    out.append(desc)
-    if date:
-        out.append(date)
-    out.append("Номер объявления")
-    out.append(text)
-    if place:
-        out.append("Расположение *")
-        out.append(place)
+    h = re.sub(r"<img[^>]*>", _img, h, flags=re.I)
+    h = re.sub(r"<a\b[^>]*>(.*?)</a>", _a, h, flags=re.S | re.I)
+    h = re.sub(r"<h([1-6])[^>]*>(.*?)</h\1>",
+               lambda m: "\n\n%s %s\n\n" % ("#" * int(m.group(1)), _plain(m.group(2))),
+               h, flags=re.S | re.I)
+    h = re.sub(r"<br\s*/?>", "\n", h, flags=re.I)
+    h = re.sub(r"</(p|div|li|tr|td|section|article|ul|ol|table|span)>", "\n", h, flags=re.I)
+    h = re.sub(r"<[^>]+>", " ", h)
+    h = htmllib.unescape(h)
+    h = re.sub(r"[ \t\u00a0]+", " ", h)
+    h = re.sub(r"\n[ \t]+", "\n", h)
+    h = re.sub(r"\n{3,}", "\n\n", h)
+    return h.strip()
 
-    imgs = [u for u in _imgs(html, base) if not any(j in u for j in IMG_JUNK)]
-    if imgs:
-        out.append("\n".join("![Image](%s)" % u for u in imgs))
-    return "\n\n".join(x for x in out if x)
+# ---------- чтение ----------
 
-def _direct(sess, url):
-    try:
-        r = sess.get(url, headers={
-            "User-Agent": UA,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "ru,hy;q=0.9,en;q=0.7",
-        }, timeout=30)
-        print("  ուղիղ՝ %s, %s նշան" % (r.status_code, len(r.text or "")))
-        if r.status_code == 200 and not is_blocked(r.text):
-            return r.text
-    except Exception as e:
-        print("  ուղիղ սխալ՝", type(e).__name__)
-    return ""
+def jina(sess, url, extra=None, tries=2):
+    h = dict(HDRS)
+    h["x-engine"] = "browser"
+    if extra:
+        h.update(extra)
 
-def _via_jina(sess, url, extra):
-    # 1) browser engine (անցնում է JS-ստուգումը) 2) առանց engine-ի, եթե 401/քվոտա է եղել
-    for i, eng in enumerate(({"x-engine": "browser", "x-no-cache": "true"}, {}), 1):
-        h = {"User-Agent": "curl/8.5.0"}
-        if JINA_KEY:
-            h["Authorization"] = "Bearer " + JINA_KEY
-        h.update(eng)
-        if extra:
-            h.update(extra)
+    for attempt in range(tries):
         try:
-            r = sess.get(JINA + url, headers=h, timeout=35)
-            print("  jina %s՝ %s, %s նշան" % (i, r.status_code, len(r.text or "")))
-            if r.status_code == 200 and not is_blocked(r.text):
-                return r.text, True
-        except Exception as e:
-            print("  jina սխալ՝", type(e).__name__)
-        time.sleep(1)
-    return "", False
-
-def _via_proxy(sess, url):
-    q = quote(url, safe="")
-    for p in PROXIES:
-        try:
-            r = sess.get(p + q, headers={"User-Agent": UA}, timeout=20)
-            print("  պրոքսի՝ %s, %s նշան" % (r.status_code, len(r.text or "")))
+            r = sess.get(JINA + url, headers=h, timeout=90)
             if r.status_code == 200 and not is_blocked(r.text):
                 return r.text
+            print(f"  jina {r.status_code}, {len(r.text)} знаков")
         except Exception as e:
-            print("  պրոքսի սխալ՝", type(e).__name__)
+            print("  jina ошибка:", type(e).__name__)
+        time.sleep(2 + 2 * attempt)
+
+    try:
+        r = sess.get(url, headers=HDRS, timeout=60)
+        if r.status_code == 200 and len(r.text) > 1500 and not is_blocked(r.text):
+            print("  прямой вход")
+            return to_md(r.text, url)
+        print(f"  прямой {r.status_code}, {len(r.text)} знаков")
+    except Exception as e:
+        print("  прямой ошибка:", type(e).__name__)
+
+    for p in PROXIES:
+        try:
+            r = sess.get(p, params={"url": url}, headers=HDRS, timeout=90)
+            if r.status_code == 200 and len(r.text) > 1500:
+                print("  через прокси")
+                return to_md(r.text, url)
+            print(f"  прокси {r.status_code}, {len(r.text)} знаков")
+        except Exception as e:
+            print("  прокси ошибка:", type(e).__name__)
+
+    print("  чтение не удалось:", url)
     return ""
 
-def jina(sess, url, extra=None):
-    html_mode = bool(extra and str(extra.get("x-respond-with", "")).lower() == "html")
-    raw, from_jina = "", False
+# ---------- перевод ----------
 
-    raw = _direct(sess, url)
-    if not raw:
-        raw, from_jina = _via_jina(sess, url, extra)
-    if not raw:
-        raw = _via_proxy(sess, url)
-    if not raw:
-        print("  ընթերցումը չհաջողվեց՝", url)
-        return ""
+def _google(sess, text):
+    r = sess.get("https://translate.googleapis.com/translate_a/single",
+                 params={"client": "gtx", "sl": "hy", "tl": "ru",
+                         "dt": "t", "q": text[:1800]}, timeout=30)
+    return "".join(p[0] for p in r.json()[0] if p and p[0]).strip()
 
-    if html_mode or from_jina:
-        return raw
-    return to_md(raw, url)
+def _clients5(sess, text):
+    r = sess.get("https://clients5.google.com/translate_a/t",
+                 params={"client": "dict-chrome-ex", "sl": "hy", "tl": "ru",
+                         "q": text[:1800]}, timeout=30)
+    d = r.json()
+    if isinstance(d, list) and d:
+        if isinstance(d[0], list):
+            return "".join(x[0] for x in d[0] if x and x[0]).strip()
+        if isinstance(d[0], str):
+            return "".join(d).strip()
+    if isinstance(d, dict):
+        sents = d.get("sentences")
+        if sents:
+            return "".join(s.get("trans", "") for s in sents).strip()
+        return (d.get("translation") or "").strip()
+    return ""
 
-# ---------- թարգմանություն՝ երեք աստիճանով ----------
+def _mymemory(sess, text):
+    r = sess.get("https://api.mymemory.translated.net/get",
+                 params={"q": text[:450], "langpair": "hy|ru"}, timeout=30)
+    return ((r.json().get("responseData") or {}).get("translatedText") or "").strip()
 
-def _gjson(sess, url, params):
-    try:
-        r = sess.get(url, params=params, headers={"User-Agent": UA}, timeout=25)
-        if r.status_code != 200:
-            print("  թարգմանություն՝ %s" % r.status_code)
-            return None
-        return r.json()
-    except Exception as e:
-        print("  թարգմանություն՝", type(e).__name__)
-        return None
+CHAIN = (("google", _google), ("clients5", _clients5), ("mymemory", _mymemory))
 
 def translate(sess, text):
+    """Переводим только армянский. Все отказали — публикуем оригинал."""
     text = (text or "").strip()
-    if not text:
+    if not text or not has_hy(text):
         return text
-    q = text[:2000]
-
-    # 1) translate.googleapis.com
-    data = _gjson(sess, "https://translate.googleapis.com/translate_a/single",
-                  {"client": "gtx", "sl": "auto", "tl": "ru", "dt": "t", "q": q})
-    if isinstance(data, list) and data and isinstance(data[0], list):
-        res = "".join(p[0] for p in data[0]
-                      if p and isinstance(p, list) and p[0]).strip()
-        if res:
-            return res
-
-    # 2) clients5.google.com
-    data = _gjson(sess, "https://clients5.google.com/translate_a/t",
-                  {"client": "dict-chrome-ex", "sl": "auto", "tl": "ru", "q": q})
-    parts = []
-    if isinstance(data, list):
-        for it in data:
-            if isinstance(it, list) and it and isinstance(it[0], str):
-                parts.append(it[0])
-            elif isinstance(it, str):
-                parts.append(it)
-    elif isinstance(data, dict) and isinstance(data.get("sentences"), list):
-        for it in data["sentences"]:
-            if isinstance(it, dict) and it.get("trans"):
-                parts.append(it["trans"])
-    res = " ".join(parts).strip()
-    if res:
-        return res
-
-    # 3) api.mymemory.translated.net (միայն հայերեն տեքստի համար)
-    if re.search(r"[Ա-Ֆա-ֆ]", q):
-        data = _gjson(sess, "https://api.mymemory.translated.net/get",
-                      {"q": q, "langpair": "hy|ru"})
-        if isinstance(data, dict):
-            res = ((data.get("responseData") or {}).get("translatedText") or "").strip()
-            if res and "MYMEMORY WARNING" not in res.upper():
+    for name, fn in CHAIN:
+        if name == "mymemory" and len(text) > 450:
+            continue
+        try:
+            res = fn(sess, text)
+            if res and has_cyr(res):
                 return res
-
+            if res:
+                print(f"  перевод {name} без кириллицы, пробуем дальше")
+        except Exception as e:
+            print(f"  перевод {name} недоступен:", type(e).__name__)
+        time.sleep(1)
+    print("  перевод не вышел — публикуем оригинал")
     return text
+
+# ---------- общая тетрадь публикаций ----------
+
+_LED = None
+
+def ledger():
+    global _LED
+    if _LED is None:
+        try:
+            _LED = json.load(open(LEDGER, encoding="utf-8"))
+        except Exception:
+            _LED = {}
+    return _LED
+
+def ledger_save():
+    try:
+        json.dump(ledger(), open(LEDGER, "w", encoding="utf-8"), ensure_ascii=False)
+    except Exception as e:
+        print("  тетрадь не сохранилась:", type(e).__name__)
+
+def led_key(site, iid):
+    return f"{site}-{str(iid).strip()}"
+
+def led_has(site, iid):
+    return led_key(site, iid) in ledger()
+
+def led_add(site, iid, ts=None):
+    d = ledger()
+    d[led_key(site, iid)] = int(ts or time.time())
+    if len(d) > 60000:
+        keep = sorted(d.items(), key=lambda kv: kv[1])[-40000:]
+        globals()["_LED"] = dict(keep)
+    ledger_save()
