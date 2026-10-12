@@ -8,21 +8,23 @@ ivi.am -> Telegram («Барахолка Երևան»).
   2. Добираем новые объявления, но не дольше MAX_SECONDS.
   3. Состояние сохраняется после каждой ступени.
 
-Раздел листается, пока на странице есть свежее за FRESH_H часов и пока идут
-новые карточки. MAX_PAGES — только предохранитель, обычно до него не доходит:
-в списке сначала идут самые свежие, поэтому страница без свежих означает, что
-дальше только старое.
+Настройки сбора подобраны под 25-минутный потолок GitHub Actions: разделам
+хватает MAX_PAGES страниц, потому что обновлённое за неделю всегда лежит на
+первых двух.
 
 Чтение идёт прямым запросом первым (list.am отвечает ему быстро), а Jina и
 открытые прокси остаются запасными: по одной попытке, без повторов.
 
 Фотографии берём только из папки самого объявления (/files/images/items/):
-картинки меню, баннеров и рекламных плашек не публикуем. Закрытые телефоны
-вида «(0x xxx xxxx)» вырезаем из текста. Подписи кнопок сайта заголовком не
-становятся. Инфинитив вроде «Одеваться» заголовком не ставим. Заголовок и
-описание переводим на русский, не вышло — публикуем оригинал. Без фото
-объявление пропускаем. Перед публикацией очередь перемешивается, чтобы разделы
-шли вперемешку.
+картинки меню, баннеров и рекламных плашек не публикуем. Крупный размер
+предпочитаем мелкому: из пары 38576v....jpg и 38576s....jpg остаётся первый.
+Закрытые телефоны вида «(0x xxx xxxx)» вырезаем из текста. Подписи кнопок
+сайта заголовком не становятся. Заголовок и описание переводим на русский,
+не вышло — публикуем оригинал. Без фото объявление пропускаем.
+
+Хвост страницы отрезаем до «похожих объявлений»: иначе в описание попадают
+чужие заголовки и цены, а в альбом — чужие картинки. Сравнение идёт без
+учёта регистра, потому что сайт пишет «похожие» со строчной буквы.
 
 Знаки «<» и «>» в разборе страниц набраны кодом символа: в переписке такие
 сочетания иногда съедаются, и регэксп остаётся пустым.
@@ -31,7 +33,6 @@ import os
 import re
 import json
 import time
-import random
 import html as htmllib
 from datetime import datetime, timedelta, timezone
 
@@ -52,7 +53,7 @@ PUBLISH_MAX = 1          # публикаций за один запуск
 QUEUE_MAX   = 2000       # предел очереди
 FRESH_H     = 168        # сколько часов объявление считается свежим (7 суток)
 PER_CAT     = 2000       # потолок карточек на раздел
-MAX_PAGES   = 20         # предохранитель по страницам раздела
+MAX_PAGES   = 2          # сколько страниц раздела листать
 MAX_SECONDS = 15 * 60    # сколько секунд отдаём сбору, остальное — запас под потолок
 SAMPLE      = 3          # сколько карточек печатать в лог для проверки
 TEST        = False      # True -> ничего не отправлять, только показать разбор в логе
@@ -103,8 +104,9 @@ MONTHS   = {"янв": 1, "фев": 2, "мар": 3, "апр": 4, "май": 5, "м
 # закрытый телефон: (0x xxx xxxx) и любые похожие наборы «x»
 MASK_RE  = re.compile(r"\(?\s*0?\s*x{2,}[\s\-x]*x{2,}\s*\)?", re.I)
 
-CUT_AT = ("Похожие", "Другие объявления", "Последние Обявления",
-          "Նման", "Այլ հայտարար")
+# хвост страницы: сравниваем без учёта регистра, сайт пишет «похожие» строчными
+CUT_AT = ("похожие", "другие объявления", "последние обявления",
+          "նման", "այլ հայտարար")
 
 # служебные фразы сайта, которые не должны попадать в описание
 JUNK = ("вход", "добавить объявлен", "мой профиль", "մուտք", "ավելացնել հայտարար",
@@ -121,6 +123,9 @@ BAD_TITLE = ("добавить в избранное", "избранное", "н
 # картинки, которые к объявлению не относятся
 BAD_IMG = ("logo", "avatar", "icon", "sprite", "social", "flag", "banner",
            "brand", "noimage", "no-image", "placeholder", "loading")
+
+# крупный размер фото: 38576v....jpg против 38576s....jpg
+BIG_RE = re.compile(r"/\d+v[0-9a-f]{4,}\.(?:jpg|jpeg|png|webp)$", re.I)
 
 # ---------- сеть ----------
 
@@ -197,6 +202,13 @@ def gallery(h, only_items=False):
         if u not in out:
             out.append(u)
     return out
+
+def prefer_big(urls):
+    """Из пары «крупный / мелкий» оставляем крупный."""
+    if not urls:
+        return urls
+    big = [u for u in urls if BIG_RE.search(u.split("?")[0])]
+    return big or urls
 
 def clean_desc(text, limit=700):
     parts = [p.strip(" |·—") for p in re.split(r"\s*\|\s*|" + LT + r"br\s*/?" + GT, text or "")]
@@ -296,7 +308,7 @@ def card_scan(h, slug, limit):
         title = htmllib.unescape(mt.group(1)).strip() if mt else ""
         if not title or any(b in title.lower() for b in BAD_TITLE):
             title = ""                 # кнопки сайта не становятся заголовком
-        ph = gallery(win, only_items=True)
+        ph = prefer_big(gallery(win, only_items=True))
         out[iid] = {
             "id": iid,
             "url": url,
@@ -315,13 +327,14 @@ def item_data(sess, url, iid):
     h = fetch(sess, url)
     if not h:
         return None
+    low = h.lower()
     for tail in CUT_AT:
-        cut = h.find(tail)
+        cut = low.find(tail)
         if cut > 0:
             h = h[:cut]
             break
 
-    photos = gallery(h, only_items=True)
+    photos = prefer_big(gallery(h, only_items=True))
     if not photos:
         m = re.search(r'property="og:image"\s+content="([^"]+)"', h, re.I)
         if m:
@@ -363,19 +376,15 @@ def item_data(sess, url, iid):
 # ---------- текст ----------
 
 def headline(sess, e, d):
-    # сначала заголовок самой страницы объявления, потом карточка раздела
-    src = scrub(((d["title"] if d else "") or e.get("title") or "").strip())
+    src = scrub((e.get("title") or (d["title"] if d else "")).strip())
     t = scrub(translate(sess, src).strip())
     if is_translit_hy(src) or is_translit_hy(t):
         return ""
-    # инфинитив вроде «Одеваться» заголовком не ставим
-    if t and not re.search(r"(?:ться|тись)$", t.lower()) and (has_cyr(t) or script(t) == "lat"):
+    if t and (has_cyr(t) or script(t) == "lat"):
         return " ".join(t.split())[:90]
     alt = scrub(translate(sess, d["desc"][:300]).strip()) if d else ""
     if has_cyr(alt) and len(alt.split()) >= 3:
-        return " ".join(re.split(r"[.!?]\s", alt)[0].strip().split())[:90]
-    if t and (has_cyr(t) or script(t) == "lat"):
-        return " ".join(t.split())[:90]
+        return re.split(r"[.!?]\s", alt)[0].strip()[:90]
     return " ".join((t or alt).split())[:90]
 
 def caption(sess, e, d):
@@ -471,7 +480,7 @@ def norm_queue(st):
     st["queue"] = q
 
 def collect(sess, slug, st, deadline):
-    """Карточки раздела, пока идут новые и пока на странице есть свежее."""
+    """Карточки раздела, страница за страницей, пока идут новые и есть время."""
     seen = {}
     for page in range(1, MAX_PAGES + 1):
         if time.time() > deadline:
@@ -483,18 +492,13 @@ def collect(sess, slug, st, deadline):
             break
         cards = card_scan(h, slug, PER_CAT)
         new = 0
-        fresh = 0
         for iid, c in cards.items():
             if iid not in seen:
                 seen[iid] = c
                 new += 1
-            if is_fresh(c["ts"]):
-                fresh += 1
-        print(f"  стр.{page}: карточек {len(cards)}, новых {new}, свежих {fresh}")
+        print(f"  стр.{page}: карточек {len(cards)}, новых {new}")
         if new == 0 or len(seen) >= PER_CAT:
             break
-        if fresh == 0 and page > 1:
-            break                      # дальше только старое
         time.sleep(1)
     return seen
 
@@ -606,11 +610,7 @@ def main():
     while len(st["queue"]) > QUEUE_MAX:
         st["queue"].pop(0)
 
-    # 4. перемешиваем, чтобы разделы шли вперемешку
-    random.shuffle(st["queue"])
-    print("очередь:", len(st["queue"]))
-
-    # 5. если очередь была пуста и только что наполнилась — публикуем
+    # 4. если очередь была пуста и только что наполнилась — публикуем
     if done == 0 and st["queue"]:
         done += publish_phase(sess, st, time.time(), 1)
 
