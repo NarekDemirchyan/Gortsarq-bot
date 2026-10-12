@@ -2,12 +2,19 @@
 """
 list.am -> Telegram («Барахолка Երևան»).
 
-Поля карточки (заголовок, цена, место, фото, время) читаются из одного окна
-одной карточки — соседние объявления не подмешиваются. Галерею объявления
-(list.am грузит её скриптом) берём браузером: в workflow уже стоит playwright
-с chromium. Если браузер не справился — добираем jina/прямым входом.
-Публикация не зависит от страницы объявления: пост уходит и без неё.
-Латиница не переводится и не выбрасывается — публикуется как есть.
+Один запуск = один пост. Ритм задаёт run.py (слоты по 15 минут), поэтому
+INTERVAL здесь нулевой: ждать внутри запуска нечего.
+
+Заголовок и описание переводим на русский (цепочка переводчиков в fetcher.py).
+Не вышло — публикуем оригинал. Армянское слово латиницей («vacharum em heraxos»)
+не публикуем: объявление пропускаем, берём следующее.
+Фото — до 10 (больше Telegram не даёт), без фото объявление пропускаем.
+Свежим считаем объявление, обновлённое за последние 24 часа, даже если
+выставлено оно давно (в карточке «Сегодня 15:35», «11.10.2026», «12 октября»).
+id каждого поста уходит в общую тетрадь published.json.
+
+Поля карточки читаются из одного окна одной карточки — соседние не подмешиваются.
+Галерею объявления берём браузером (playwright в workflow), при неудаче — jina.
 """
 import os
 import re
@@ -18,12 +25,15 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-TOKEN    = os.environ.get("TELEGRAM_TOKEN", "")
-CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID", "")
+from fetcher import jina, translate, script, is_translit_hy, led_has, led_add
 
+TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+SITE        = "list"
 STATE       = "state.json"
-INTERVAL = 10 * 60
-PUBLISH_MAX = 1           # сколько публикаций за один запуск
+INTERVAL    = 0           # ритм задаёт расписание (run.py)
+PUBLISH_MAX = 1           # публикаций за один запуск
 QUEUE_MAX   = 250         # максимум объявлений в очереди
 FRESH_H     = 24          # сколько часов объявление считается свежим
 TEST        = False       # True -> ничего не отправлять, только лог
@@ -50,19 +60,20 @@ ITEM_RE   = re.compile(r"/ru/item/(\d+)")
 PHOTO_RE  = re.compile(r"(?:https?:)?//img\.list\.am/[a-z]+/\d+/\d+\.(?:webp|jpg|jpeg|png)", re.I)
 PRICE_RE  = re.compile(r"\d[\d\s,]{2,}\s*֏|\$\s?\d[\d\s,]{1,}(?:\.\d{1,2})?|\d[\d\s,]{2,}\s*₽")
 DATE_RE   = re.compile(r"(Сегодня|Вчера)\s*,?\s*(\d{1,2}):(\d{2})")
+FULLDATE_RE = re.compile(r"(\d{1,2})\.(\d{1,2})\.(\d{2,4})")
+MONTHDATE_RE = re.compile(r"(\d{1,2})\s+([А-Яа-яЁё]{3,})")
 ALT_MD    = re.compile(r"!\[([^\]\n]{1,160})\]\((?:https?:)?//img\.list\.am/", re.I)
 ALT_HTML  = re.compile(r"alt=\"([^\"]{1,160})\"", re.I)
 H1_HTML   = re.compile(r"<h1[^>]*>(.{2,200}?)</h1>", re.S | re.I)
 TITLE_TAG = re.compile(r"<title[^>]*>(.{2,200}?)</title>", re.S | re.I)
 BANNER    = re.compile(r"!\[[^\]]*\]\((?:https?:)?//upa\.list\.am/[^)]*\)", re.I)
-JUNK_TXT  = re.compile(r"list\.am|https?://|www\.|@|\+\d{2}\s?\d", re.I)   # адреса и телефоны
+JUNK_TXT  = re.compile(r"list\.am|https?://|www\.|@|\+\d{2}\s?\d", re.I)
 
-HY_RE  = re.compile(r"[\u0530-\u058F]")
-CYR_RE = re.compile(r"[А-Яа-яЁё]")
-LAT_RE = re.compile(r"[A-Za-z]")
+MONTHS = {"янв": 1, "фев": 2, "мар": 3, "апр": 4, "май": 5, "мая": 5, "июн": 6,
+          "июл": 7, "авг": 8, "сен": 9, "окт": 10, "ноя": 11, "дек": 12}
 
-BLOCKED  = ("just a moment", "attention required", "enable javascript",
-            "checking your browser", "cloudflare", "performing security verification")
+BLOCKED = ("just a moment", "attention required", "enable javascript",
+           "checking your browser", "cloudflare", "performing security verification")
 
 DESC_END = (r"(?:Номер объявления|Пожаловаться|Отзыв|Написать|Позвонить|Похожие|"
             r"Комментарии|Информация о (?:товаре|продавце)|Download App|На главную|"
@@ -76,21 +87,10 @@ def plain(h):
     h = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", h or "", flags=re.S | re.I)
     return " ".join(htmllib.unescape(re.sub(r"<[^>]+>", " ", h)).split())
 
-def script(s):
-    """hy — армянский, ru — кириллица, lat — латиница, none — ни одного."""
-    s = s or ""
-    if HY_RE.search(s):
-        return "hy"
-    if CYR_RE.search(s):
-        return "ru"
-    if LAT_RE.search(s):
-        return "lat"
-    return "none"
-
 def clean_title(s):
     s = htmllib.unescape(s or "")
     s = re.sub(r"^\s*Image\s*\d+\s*[:.\-–—)]*\s*", "", s, flags=re.I)
-    s = re.sub(r"\s*[-|–—]?\s*(www\.)?list\.am.*$", "", s, flags=re.I)   # хвост адреса
+    s = re.sub(r"\s*[-|–—]?\s*(www\.)?list\.am.*$", "", s, flags=re.I)
     s = re.sub(r"[\\]{1,2}", "", s)
     s = " ".join(s.split())
     return s[:140]
@@ -186,6 +186,33 @@ def card_place(win, pos, span=200):
         return ""
     return seg[-40:].strip(" ,") if 2 <= len(seg) <= 60 else ""
 
+def card_time(win):
+    """Время обновления карточки: unix-время и позиция даты (место ищем рядом)."""
+    now = datetime.now(TZ)
+    for dm in DATE_RE.finditer(win):
+        d = now.replace(hour=int(dm.group(2)), minute=int(dm.group(3)), second=0, microsecond=0)
+        if dm.group(1).lower().startswith("вчера"):
+            d = d - timedelta(days=1)
+        return int(d.timestamp()), dm.start()
+    for fm in FULLDATE_RE.finditer(win):
+        day, mon, year = int(fm.group(1)), int(fm.group(2)), int(fm.group(3))
+        year = year + 2000 if year < 100 else year
+        try:
+            d = datetime(year, mon, day, 23, 59, tzinfo=TZ)
+        except ValueError:
+            continue
+        return int(d.timestamp()), fm.start()
+    for mm in MONTHDATE_RE.finditer(win):
+        mon = MONTHS.get(mm.group(2).lower()[:3])
+        if not mon:
+            continue
+        day = int(mm.group(1))
+        d = datetime(now.year, mon, day, 23, 59, tzinfo=TZ)
+        if d > now + timedelta(days=1):
+            d = datetime(now.year - 1, mon, day, 23, 59, tzinfo=TZ)
+        return int(d.timestamp()), mm.start()
+    return 0, 0
+
 def parse_cards(text):
     out = {}
     text = BANNER.sub(" ", text or "")
@@ -206,14 +233,8 @@ def parse_cards(text):
         for pr in PRICE_RE.finditer(win):
             price = " ".join(pr.group(0).split())
 
-        ts, place = 0, ""
-        for dm in DATE_RE.finditer(win):
-            d = datetime.now(TZ).replace(hour=int(dm.group(2)), minute=int(dm.group(3)),
-                                         second=0, microsecond=0)
-            if dm.group(1).lower().startswith("вчера"):
-                d = d - timedelta(days=1)
-            ts = int(d.timestamp())
-            place = card_place(win, dm.start())
+        ts, dpos = card_time(win)
+        place = card_place(win, dpos) if dpos else ""
 
         out[iid] = {"id": iid, "url": f"{BASE}/ru/item/{iid}",
                     "title": card_title(win, pm), "price": price,
@@ -299,25 +320,9 @@ def item_extra(sess, iid):
 
 # ---------- текст ----------
 
-def translate(sess, text):
-    """Переводим только армянский. Не вышло — публикуем как есть."""
-    text = (text or "").strip()
-    if not text or script(text) != "hy":
-        return text
-    try:
-        r = sess.get("https://translate.googleapis.com/translate_a/single",
-                     params={"client": "gtx", "sl": "hy", "tl": "ru",
-                             "dt": "t", "q": text[:2000]}, timeout=30)
-        res = "".join(p[0] for p in r.json()[0] if p and p[0]).strip()
-        if res and script(res) != "lat":
-            return res
-    except Exception as e:
-        print("  перевод недоступен, публикуем оригинал:", type(e).__name__)
-    return text
-
 def make_caption(sess, e, extra):
     head = translate(sess, extra.get("title") or e["title"]).strip()
-    if not head or JUNK_TXT.search(head):
+    if not head or JUNK_TXT.search(head) or is_translit_hy(head):
         head = e["place"].strip()
     if JUNK_TXT.search(head):
         head = ""
@@ -414,7 +419,7 @@ def norm_queue(st):
 def main():
     if not TOKEN or not CHAT_ID:
         print("нет TELEGRAM_TOKEN / TELEGRAM_CHAT_ID")
-        return
+        return 0
 
     st = load()
     st.setdefault("seen", [])
@@ -438,19 +443,24 @@ def main():
         fresh_cards.update(fresh)
         time.sleep(3)
 
-    # 2. новое — в очередь (латиница тоже берётся, просто без перевода)
+    # 2. новое — в очередь
     known = {e["id"] for e in st["queue"]}
-    added, latin = 0, 0
+    added, latin, translit = 0, 0, 0
     for iid, c in fresh_cards.items():
-        if iid in st["seen"] or iid in st["published"] or iid in known:
+        if (iid in st["seen"] or iid in st["published"]
+                or iid in known or led_has(SITE, iid)):
             continue
         st["seen"].append(iid)
+        if is_translit_hy(c["title"]):
+            translit += 1
+            print(f"    латиницей армянский, пропускаем: {iid} «{c['title'][:60]}»")
+            continue
         if script(c["title"]) == "lat":
             latin += 1
             print(f"    латиница, пойдёт как есть: {iid} «{c['title'][:60]}»")
         st["queue"].append(c)
         added += 1
-    print(f"новых в очередь: {added}, из них латиницей: {latin}")
+    print(f"новых в очередь: {added}, из них латиницей: {latin}, пропущено транслитом: {translit}")
     st["seen"] = st["seen"][-100000:]
     while len(st["queue"]) > QUEUE_MAX:
         st["queue"].pop(0)
@@ -460,52 +470,57 @@ def main():
         for e in st["queue"][:3]:
             print("---", e["url"], "|", make_caption(sess, e, {"desc": ""}))
         browser_stop()
-        return
+        return 0
 
-    # 3. публикации
-    if st["queue"] and now - st["last_publish"] >= INTERVAL:
-        sent, tried = 0, 0
-        while st["queue"] and sent < PUBLISH_MAX and tried < PUBLISH_MAX * 3:
-            tried += 1
-            e = st["queue"].pop(0)
-            if e["id"] in st["published"]:
-                continue
+    # 3. публикация — ровно один пост за запуск
+    sent, tried = 0, 0
+    while st["queue"] and sent < PUBLISH_MAX and tried < PUBLISH_MAX * 3:
+        if now - st["last_publish"] < INTERVAL:
+            break
+        tried += 1
+        e = st["queue"].pop(0)
+        if e["id"] in st["published"] or led_has(SITE, e["id"]):
+            continue
 
-            extra = {"photos": [], "desc": "", "title": ""}
-            try:
-                extra = item_extra(sess, e["id"])
-            except Exception as ex:
-                print("  страница объявления не далась:", ex)
+        extra = {"photos": [], "desc": "", "title": ""}
+        try:
+            extra = item_extra(sess, e["id"])
+        except Exception as ex:
+            print("  страница объявления не далась:", ex)
 
-            photos = extra["photos"] or ([e["photo"]] if e["photo"] else [])
-            cap = make_caption(sess, e, extra)
+        head = extra.get("title") or e["title"]
+        if is_translit_hy(head):
+            print("  латиницей армянский, пропускаем:", e["id"], f"«{head[:50]}»")
+            continue
 
-            ok = False
-            try:
-                ok = bool(cap) and bool(photos) and send(sess, e, photos, cap)
-            except Exception as ex:
-                print("ошибка отправки:", ex)
+        photos = extra["photos"] or ([e["photo"]] if e["photo"] else [])
+        if not photos:
+            print("  без фото, пропускаем:", e["id"])
+            continue
 
-            if ok:
-                st["last_publish"] = now
-                st["published"][e["id"]] = now
-                sent += 1
-                print("опубликовано:", e["id"], f"фото {len(photos)}")
-                continue
+        cap = make_caption(sess, e, extra)
+        ok = False
+        try:
+            ok = bool(cap) and send(sess, e, photos, cap)
+        except Exception as ex:
+            print("ошибка отправки:", ex)
 
-            st["failed"][e["id"]] = st["failed"].get(e["id"], 0) + 1
-            print("  не вышло:", e["id"], "ошибок", st["failed"][e["id"]])
-            if st["failed"][e["id"]] < 2:
-                st["queue"].append(e)
-        print("за запуск опубликовано:", sent)
-    else:
-        if not st["queue"]:
-            print("публиковать нечего: очередь пуста")
-        else:
-            passed = int((now - st["last_publish"]) / 60)
-            left = int((INTERVAL - (now - st["last_publish"])) / 60) + 1
-            print(f"интервал: прошло {passed} мин из {INTERVAL // 60}, "
-                  f"следующая публикация примерно через {left} мин")
+        if ok:
+            st["last_publish"] = now
+            st["published"][e["id"]] = now
+            led_add(SITE, e["id"], now)
+            sent += 1
+            print("опубликовано:", e["id"], f"фото {len(photos)}")
+            continue
+
+        st["failed"][e["id"]] = st["failed"].get(e["id"], 0) + 1
+        print("  не вышло:", e["id"], "ошибок", st["failed"][e["id"]])
+        if st["failed"][e["id"]] < 2:
+            st["queue"].append(e)
+
+    if not st["queue"]:
+        print("публиковать нечего: очередь пуста")
+    print("за запуск опубликовано:", sent)
 
     if len(st["published"]) > 50000:
         keys = list(st["published"])[-50000:]
@@ -516,7 +531,7 @@ def main():
     browser_stop()
     json.dump(st, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
     print("готово, в очереди:", len(st["queue"]))
+    return sent
 
-from fetcher import jina
-
-main()
+if __name__ == "__main__":
+    main()
