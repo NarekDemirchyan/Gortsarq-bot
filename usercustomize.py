@@ -12,9 +12,11 @@
    запрос повторяется до трёх раз с паузой.
 
 3. Чистка ivi.am. На страницах ivi.am вместе с текстом лежат скрипты
-   (счётчики, реклама). Бот убирает теги, но текст внутри script остаётся
-   и попадает в описание объявления. Здесь код и стили вырезаются
-   из ответа ещё до разбора, а адреса фотографий объявления собираются
+   (счётчики, реклама) и служебный блок продавца: ссылки на профиль,
+   аватар, строка о регистрации. Бот убирает теги, но текст внутри script
+   остаётся и попадает в описание объявления. Здесь код и стили вырезаются
+   из ответа ещё до разбора, служебные ссылки, картинки, адреса и строки
+   продавца вычищаются, а адреса фотографий объявления собираются
    из ответа до вырезания и возвращаются в начало — иначе они пропадают.
 
 4. Альбом без повторов. list.am отдаёт одну фотографию в разных размерах,
@@ -48,6 +50,14 @@ COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 ITEM_IMG_RE = re.compile(
     r"(?:https?:(?:\\?/){2}ivi\.am)?(?:\\?/)+files(?:\\?/)+images(?:\\?/)+items"
     r"(?:\\?/)+[^\s\"'<>]+?\.(?:jpg|jpeg|png|webp)", re.I)
+MD_LINK_RE = re.compile(r"\[[^\]]*\]\(\s*[^)]*\)", re.S)
+BRACKET_RE = re.compile(r"[\[\]]")
+IMG_TAG_RE = re.compile(r"<img[^>]*>", re.I)
+A_TAG_RE = re.compile(r"</?a\b[^>]*>", re.I)
+SELLER_RE = re.compile(r"частное лицо на сайте с[^<]*?20\d\d", re.I)
+URL_RE = re.compile(r"https?://(?:www\.)?ivi\.am/\S+")
+SPACES_RE = re.compile(r"[ \t]{2,}")
+HEADING_RE = re.compile(r"^#{1,6}\s*", re.M)
 TRIES = 3
 
 # ---------- ключ Jina ----------
@@ -116,8 +126,19 @@ def _photos(body, url):
                 break
     return out
 
+def _strip(clean):
+    """Убрать служебный мусор: ссылки, картинки, адреса, блок продавца."""
+    clean = MD_LINK_RE.sub(" ", clean)
+    clean = A_TAG_RE.sub(" ", clean)
+    clean = IMG_TAG_RE.sub(" ", clean)
+    clean = URL_RE.sub(" ", clean)
+    clean = SELLER_RE.sub(" ", clean)
+    clean = BRACKET_RE.sub(" ", clean)
+    clean = HEADING_RE.sub("", clean)
+    return SPACES_RE.sub(" ", clean)
+
 def _trim(r, url=""):
-    """Убрать код и стили, но сохранить фотографии объявления."""
+    """Убрать код, стили и служебные ссылки, но сохранить фотографии."""
     try:
         body = getattr(r, "text", "") or ""
         if len(body) < 3000 or "script" not in body.lower():
@@ -125,6 +146,7 @@ def _trim(r, url=""):
         saved = _photos(body, url) if "/ru/item/" in url else []
         clean = SCRIPT_RE.sub(" ", body)
         clean = COMMENT_RE.sub(" ", clean)
+        clean = _strip(clean)
         if len(clean) < 2000:
             return r
         if saved:
