@@ -1,196 +1,380 @@
 # -*- coding: utf-8 -*-
 """
-gortsarq.am -> Telegram («Барахолка Երևան»).
+ivi.am -> Telegram («Барахолка Երևան»).
 
 Как бот собирает объявление:
-  1. Обходит разделы (CATS) и листает страницы раздела, пока идут новые
-     карточки; потолок — PER_CAT ссылок на раздел.
-  2. Берёт объявления за последнюю неделю по дате на карточке (ДД.ММ.ГГГГ).
-     Объявление без даты считает сегодняшним.
-  3. Открывает страницу объявления и берёт оттуда фотографии (до 10),
-     заголовок, цену, место и описание.
+  1. Обходит разделы (SECTIONS) и листает страницы раздела, пока идут новые
+     карточки; потолок — PER_CAT карточек на раздел.
+  2. С карточки берёт номер, ссылку, название, цену и строку «Обновлено».
+     Свежими считает обновлённые за последние FRESH_H часов.
+  3. Открывает страницу объявления и берёт оттуда галерею фотографий (до 10)
+     и описание.
   4. Публикует по одному объявлению за запуск: название, цена, место,
      описание и кнопка «Связаться».
 
 Один id может выйти снова: если продавец обновил объявление позже, чем оно
-выходило в группе, оно публикуется заново. У gortsarq на карточке видна
-только дата, поэтому сравниваются даты, а не часы.
+выходило в группе, оно публикуется заново. Сравнивается время обновления
+с временем нашей публикации, а не один только id.
 
-Закрытые телефоны вида «(0x xxx xxxx)» из текста вырезаем.
+Фотографии берём только из папки самого объявления (/files/images/items/):
+картинки меню, баннеров и рекламных плашек не публикуем. Закрытые телефоны
+вида «(0x xxx xxxx)» вырезаем из текста: они бесполезны покупателю. Подписи
+кнопок сайта («Добавить в избранное») заголовком не становятся.
 
-Чтение и перевод — из fetcher.py. Заголовок и описание переводим на русский,
-не вышло — публикуем оригинал. Армянское слово латиницей («vacharum em
-heraxos») не публикуем, берём следующее. Фото — до 10, без фото объявление
-пропускаем.
+Заголовок и описание переводим на русский (цепочка в fetcher.py); не вышло —
+публикуем оригинал. Армянское слово латиницей («vacharum em heraxos») не
+публикуем, берём следующее. Без фото объявление пропускаем.
 
-Знаки «<» и «>» в разборе страниц набраны кодом символа (GT): в переписке
-такие сочетания иногда съедаются, и регэксп остаётся пустым.
+Знаки «<» и «>» в разборе страниц набраны кодом символа: в переписке такие
+сочетания иногда съедаются, и регэксп остаётся пустым.
 """
 import os
 import re
 import json
 import time
+import html as htmllib
+from datetime import datetime, timedelta, timezone
 
 import requests
 
-from fetcher import jina, translate, script, has_cyr, is_translit_hy, led_add
+from fetcher import translate, script, has_cyr, is_translit_hy, led_add
 
+LT = chr(60)
 GT = chr(62)
 
 TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-SITE       = "gortsarq"
-STATE      = "state-gortsarq.json"
-INTERVAL   = 0              # ритм задаёт расписание (run.py)
-QUEUE_MAX  = 2000           # максимум объявлений в очереди
-FRESH_DAYS = 7              # берём объявления за последнюю неделю
-PER_CAT    = 2000           # потолок ссылок на раздел
-MAX_PAGES  = 5              # сколько страниц раздела листать
-RESET_ONCE = False          # однократный сброс очереди (уже сделан)
-TEST       = False
+SITE        = "ivi"
+STATE       = "state-ivi.json"
+INTERVAL    = 0          # ритм задаёт расписание (run.py)
+PUBLISH_MAX = 1          # публикаций за один запуск
+QUEUE_MAX   = 2000       # предел очереди
+FRESH_H     = 168        # сколько часов объявление считается свежим (7 суток)
+PER_CAT     = 2000       # потолок карточек на раздел
+MAX_PAGES   = 10         # сколько страниц раздела листать
+SAMPLE      = 3          # сколько карточек печатать в лог для проверки
+TEST        = False      # True -> ничего не отправлять, только показать разбор в логе
 
-BASE = "https://gortsarq.am"
+BASE = "https://ivi.am"
+TZ   = timezone(timedelta(hours=4))          # время сайта (Ереван)
 
-CATS = [
-    "265c-2-ansharj-guyq",          # Անշարժ գույք
-    "1796c-pahestamaser",           # Պահեստամասեր
-    "1875c-kendaniner",             # Կենդանիներ
-    "1904c-elektronika-hy",         # Էլեկտրոնիկա
-    "2063c-tun-ev-aygi",            # Տուն և այգի
-    "2116c-noradzevutyun-ev-och",   # Նորաձևություն և ոճ
-    "2295c-mankakan-ashxarh",       # Մանկական աշխարհ
-    "2328c-hobbi-hangist-ev-sport", # Հոբբի, հանգիստ և սպորտ
-]
+ITEM_IMGS = "/files/images/items/"           # только настоящие фото объявлений
 
-ITEM_RE    = re.compile(r"""https://gortsarq\.am/ru/(\d+)p-[^)\]\s"'""" + GT + r"""]+""")
-ITEM_ID_RE = re.compile(r"/(\d+)p-")
-PHOTO_RE   = re.compile(r"""https://gortsarq\.am/images/detailed/\d+/[^)\]\s"'""" + GT + r"""]+""")
-DATE_RE    = re.compile(r"\d{2}\.\d{2}\.\d{4}")
+SECTIONS = {
+    "elektronika":         "Электроника",
+    "dom-i-sad":           "Дом и сад",
+    "transport":           "Транспорт",
+    "moda-i-stil":         "Мода и стиль",
+    "detskiy-mir":         "Детский мир",
+    "zhivotnye":           "Животные",
+    "hobbi-otdyh-i-sport": "Искусство и хобби",
+    "ansharj-guyq":        "Недвижимость (только продажа)",
+    "lost-found":          "Потеряно / найдено",
+}
+
+# подкатегории, которые не берём, даже если они попали в раздел
+SKIP_SUB = {
+    "ansharj-guyq": ("vardzakalotyon",),       # аренда недвижимости
+    "transport":    ("avto-moto-uslugi",),     # автосервис, мойки
+    "dom-i-sad":    ("stroitelstvo-remont",),  # стройка и ремонт
+}
+
+HDRS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
+    "Accept-Language": "ru,hy;q=0.9,en;q=0.8",
+}
+
+LINK_RE  = re.compile(r"/ru/item/([a-z0-9][a-z0-9\-]*?)-(\d{1,12})\.html", re.I)
+IMG_RE   = re.compile(r'(?:src|data-src|data-original|data-lazy)="([^"]+\.(?:jpg|jpeg|png|webp))"', re.I)
+PRICE_RE = re.compile(r"(\d[\d\s]{0,12})\s*(֏|\$|€|₽)")
+UPD_RE   = re.compile(r"(?:Обновлено|Թարմացվել է)\s*:?\s*([^|]{1,40})")
+REL_RE   = re.compile(r"([^|]{0,20}(?:Сегодня|Вчера|այսօր|երեկ)\s+\d{1,2}:\d{2})")
+TITLE_RE = re.compile(r'title="([^"]{2,120})"')
+MONTHS   = {"янв": 1, "фев": 2, "мар": 3, "апр": 4, "май": 5, "мая": 5, "июн": 6,
+            "июл": 7, "авг": 8, "сен": 9, "окт": 10, "ноя": 11, "дек": 12}
 
 # закрытый телефон: (0x xxx xxxx) и любые похожие наборы «x»
-MASK_RE    = re.compile(r"\(?\s*0?\s*x{2,}[\s\-x]*x{2,}\s*\)?", re.I)
+MASK_RE  = re.compile(r"\(?\s*0?\s*x{2,}[\s\-x]*x{2,}\s*\)?", re.I)
 
-def today_str():
-    return time.strftime("%d.%m.%Y", time.gmtime(time.time() + 4 * 3600))
+CUT_AT = ("Похожие", "Другие объявления", "Последние Обявления",
+          "Նման", "Այլ հայտարար")
+
+# служебные фразы сайта, которые не должны попадать в описание
+JUNK = ("вход", "добавить объявлен", "мой профиль", "մուտք", "ավելացնել հայտարար",
+        "премиум", "premium", "vip", "избранное", "все объявлен", "показать телефон",
+        "написать продавцу", "написать автору", "позвонить", "звонить", "жалоб",
+        "наверх", "facebook", "հավանել", "тэг", "регион", "категор", "today",
+        "հայտարարություն", "состояние", "վիճակ", "просмотр", "դիտում",
+        "комментар", "մեկնաբան", "поделиться", "կիսվել")
+
+# подписи кнопок сайта: заголовком объявления быть не должны
+BAD_TITLE = ("добавить в избранное", "избранное", "написать продавцу", "написать автору",
+             "позвонить", "сравнить", "հավանել", "ավելացնել էջանիշներում")
+
+# картинки, которые к объявлению не относятся
+BAD_IMG = ("logo", "avatar", "icon", "sprite", "social", "flag", "banner",
+           "brand", "noimage", "no-image", "placeholder", "loading")
+
+# ---------- сеть ----------
+
+def fetch(sess, url):
+    """Прямой запрос, при отказе — открытый прокси. Сайт защиты не имеет."""
+    for attempt in range(2):
+        try:
+            r = sess.get(url, headers=HDRS, timeout=40)
+            if r.status_code == 200 and len(r.text) > 1500:
+                return r.text
+            print(f"  прямой {r.status_code}, {len(r.text)} знаков")
+        except Exception as e:
+            print(f"  ошибка {type(e).__name__}: {e}")
+        time.sleep(2)
+    try:
+        r = sess.get("https://api.allorigins.win/raw",
+                     params={"url": url}, headers=HDRS, timeout=60)
+        if r.status_code == 200 and len(r.text) > 1500:
+            print("  через прокси")
+            return r.text
+        print(f"  прокси {r.status_code}, {len(r.text)} знаков")
+    except Exception as e:
+        print(f"  прокси ошибка: {type(e).__name__}: {e}")
+    return ""
+
+def plain(h):
+    return " ".join(htmllib.unescape(re.sub(LT + "[^" + GT + "]+" + GT, " ", h)).split())
 
 def scrub(text):
     """Убираем закрытые телефоны и лишние пробелы."""
     return " ".join(MASK_RE.sub(" ", text or "").split())
 
-def last_days(n):
-    out = set()
-    base = time.time() + 4 * 3600
-    for k in range(n + 1):
-        out.add(time.strftime("%d.%m.%Y", time.gmtime(base - k * 24 * 3600)))
+# ---------- разбор ----------
+
+def find_price(txt):
+    m = PRICE_RE.search(txt or "")
+    if not m:
+        return ""
+    return " ".join(m.group(1).split()) + " " + m.group(2)
+
+def gallery(h, only_items=False):
+    """Фотографии объявления по порядку. only_items — только папка самого объявления."""
+    out = []
+    for m in IMG_RE.finditer(h or ""):
+        u = htmllib.unescape(m.group(1))
+        if u.startswith("//"):
+            u = "https:" + u
+        elif u.startswith("/"):
+            u = BASE + u
+        low = u.lower()
+        if any(bad in low for bad in BAD_IMG):
+            continue
+        if only_items and ITEM_IMGS not in low:
+            continue
+        if u not in out:
+            out.append(u)
     return out
 
-def list_url(cat, page):
-    return f"{BASE}/ru/{cat}/" if page == 1 else f"{BASE}/ru/{cat}/?page={page}"
+def clean_desc(text, limit=700):
+    parts = [p.strip(" |·—") for p in re.split(r"\s*\|\s*|" + LT + r"br\s*/?" + GT, text or "")]
+    keep = []
+    for p in parts:
+        if len(p) < 5:
+            continue
+        low = p.lower()
+        if any(j in low for j in JUNK):
+            continue
+        p = scrub(p)
+        if len(p) < 5 or MASK_RE.search(p):
+            continue
+        keep.append(p)
+    return " ".join(keep)[:limit]
 
-def get_items(sess):
-    """Ссылки разделов: страница за страницей, пока идут новые."""
-    found = {}
-    for cat in CATS:
-        per_cat = 0
-        for page in range(1, MAX_PAGES + 1):
-            md = jina(sess, list_url(cat, page))
-            if not md:
-                break
-            n = 0
-            for m in ITEM_RE.finditer(md):
-                iid = m.group(1)
-                path = m.group(0)[len(BASE):].split("]")[0].split(")")[0]
-                tail = md[m.end():m.end() + 300]
-                d = DATE_RE.search(tail)
-                date = d.group(0) if d else ""
-                if iid not in found:
-                    found[iid] = {"path": path, "date": date}
-                    n += 1
-                elif date and not found[iid]["date"]:
-                    found[iid]["date"] = date
-            per_cat += n
-            print(f"[{cat}] стр.{page}: новых {n}")
-            if n == 0 or per_cat >= PER_CAT:
-                break
-            time.sleep(3)
-    return found
+def desc_reserve(txt, limit=700):
+    """Запасной путь: служебные фразы вырезаем по одной, а не целым куском."""
+    tail = txt or ""
+    for key in ("Состояние", "Վիճակ", "Просмотр", "Դիտում"):
+        k = tail.find(key)
+        if k > 0:
+            tail = tail[k:]
+            break
+    low = tail.lower()
+    for j in JUNK:
+        i = low.find(j)
+        while i >= 0:
+            tail = tail[:i] + " " + tail[i + len(j):]
+            low = tail.lower()
+            i = low.find(j)
+    return scrub(" ".join(tail.split()))[:limit]
 
-def item_data(sess, path):
-    md = jina(sess, BASE + path)
-    if not md:
+def parse_updated(s):
+    """'Сегодня 19:03' / 'Вчера 22:10' / '11 октября' / '11.10.2026' -> unix-время."""
+    s = (s or "").strip()
+    if not s:
         return None
+    now = datetime.now(TZ)
+    mt = re.search(r"(\d{1,2}):(\d{2})", s)
+    hh, mm = (int(mt.group(1)), int(mt.group(2))) if mt else (23, 59)
+    low = s.lower()
+    if "сегодня" in low or "այսօր" in low:
+        d = now
+    elif "вчера" in low or "երեկ" in low:
+        d = now - timedelta(days=1)
+    else:
+        md = re.search(r"(\d{1,2})[.\s]+(\d{1,2})[.\s]+(\d{2,4})", s)
+        if md:
+            day, mon, year = int(md.group(1)), int(md.group(2)), int(md.group(3))
+            year = year + 2000 if year < 100 else year
+            try:
+                d = datetime(year, mon, day, hh, mm, tzinfo=TZ)
+            except ValueError:
+                return None
+        else:
+            mn = re.search(r"(\d{1,2})\s+([А-Яа-яЁё]+)", s)
+            if not mn:
+                return None
+            mon = MONTHS.get(mn.group(2).lower()[:3])
+            if not mon:
+                return None
+            year = now.year
+            d = datetime(year, mon, int(mn.group(1)), hh, mm, tzinfo=TZ)
+            if d > now + timedelta(days=1):
+                d = datetime(year - 1, mon, int(mn.group(1)), hh, mm, tzinfo=TZ)
+    return d.replace(hour=hh, minute=mm, second=59, microsecond=0).timestamp()
 
-    html = jina(sess, BASE + path, {"x-respond-with": "html"})
-    cut = html.find("Похожие")
-    if cut > 0:
-        html = html[:cut]
+def is_fresh(ts):
+    if not ts:
+        return False
+    now = time.time()
+    return 0 <= now - ts <= FRESH_H * 3600
+
+def card_scan(h, slug, limit):
+    """Карточки раздела: id, ссылка, название, цена, «Обновлено», фото."""
+    ms = list(LINK_RE.finditer(h))
+    out = {}
+    skip = SKIP_SUB.get(slug, ())
+    i = 0
+    while i < len(ms):
+        iid = ms[i].group(2)
+        j = i + 1
+        while j < len(ms) and ms[j].group(2) == iid:
+            j += 1                     # карточка ссылается на объявление дважды
+        start = ms[i - 1].end() if i > 0 else 0       # включаем открытые теги карточки
+        end = ms[j].start() if j < len(ms) else min(len(h), ms[j - 1].end() + 3000)
+        win = h[start:end]
+        url = BASE + ms[i].group(0)
+        i = j
+        if iid in out or any(tok in win for tok in skip):
+            continue
+        txt = plain(win)[:500]
+        mu = UPD_RE.search(txt) or REL_RE.search(txt)
+        upd = mu.group(1).strip(" |·—") if mu else ""
+        mt = TITLE_RE.search(win)
+        title = htmllib.unescape(mt.group(1)).strip() if mt else ""
+        if not title or any(b in title.lower() for b in BAD_TITLE):
+            title = ""                 # кнопки сайта не становятся заголовком
+        ph = gallery(win, only_items=True)
+        out[iid] = {
+            "id": iid,
+            "url": url,
+            "title": title,
+            "price": find_price(txt),
+            "updated_txt": upd,
+            "ts": parse_updated(upd),
+            "photo": ph[0] if ph else "",
+        }
+        if len(out) >= limit:
+            break
+    return out
+
+def item_data(sess, url, iid):
+    """Фото и описание объявления. Название, цену и место даёт карточка раздела."""
+    h = fetch(sess, url)
+    if not h:
+        return None
+    for tail in CUT_AT:
+        cut = h.find(tail)
+        if cut > 0:
+            h = h[:cut]
+            break
+
+    photos = gallery(h, only_items=True)
+    if not photos:
+        m = re.search(r'property="og:image"\s+content="([^"]+)"', h, re.I)
+        if m:
+            u = htmllib.unescape(m.group(1))
+            if ITEM_IMGS in u.lower():
+                photos = [u]
+
+    txt = plain(h)
 
     title = ""
-    m = re.search(r"^#{1,3}\s+(.+)$", md, re.M)
+    m = re.search(LT + r"h1[^" + GT + r"]*" + GT + r"(.*?)" + LT + r"/h1" + GT, h, re.S)
     if m:
-        title = scrub(m.group(1).strip())
+        title = scrub(plain(m.group(1)))
 
-    price = ""
-    m = re.search(r"([\d][\d ,\.]*)\s*(֏|\$|€)", md)
-    if m:
-        num = " ".join(re.sub(r"[.,]00$", "", m.group(1).strip()).split())
-        if re.search(r"[1-9]", num):
-            price = num + " " + m.group(2)
-    if not price and "Договорная" in md:
-        price = "Договорная"
+    # номер объявления ищем тремя способами: «| N <id>», «N <id>», «N: <id>»
+    mi = None
+    for pat in (r"\|\s*N\s*" + str(iid), r"\bN\s*" + str(iid), r"N\s*[:№]?\s*" + str(iid)):
+        mi = re.search(pat, txt)
+        if mi:
+            break
+    head_zone = txt[:mi.start()] if mi else txt[:1500]
 
-    desc = ""
-    m = re.search(r"Описание\s*\n+(.+?)\n+\d{2}\.\d{2}\.\d{4}", md, re.S)
-    if m:
-        desc = scrub(" ".join(m.group(1).split()))
+    price = find_price(head_zone)
 
     place = ""
-    m = re.search(r"Расположение\s*\n+(.+)", md)
+    m = re.search(r"([А-Яа-яЁёA-Za-z][^|" + LT + GT + r"]{2,40}?)\s*\|\s*\d{2}\.\d{2}\.\d{4}", txt)
     if m:
-        place = " ".join(m.group(1).split())[:60]
+        place = re.sub(r"\s+", " ", m.group(1)).strip(" ,")
 
-    photos = []
-    for m in PHOTO_RE.finditer(md + "\n" + html):
-        u = m.group(0).split("]")[0].split(")")[0]
-        if u not in photos:
-            photos.append(u)
+    desc = clean_desc(txt[mi.end():]) if mi else ""
+    if len(desc) < 20:
+        desc = desc_reserve(txt)
 
-    return {"title": title, "price": price, "desc": desc,
-            "place": place, "photos": photos[:10], "url": BASE + path}
+    print(f"  {iid}: фото {len(photos)}, цена «{price}», место «{place}», "
+          f"описание {len(desc)} знаков, блок {'найден' if mi else 'не найден'}")
+    return {"title": title, "price": price, "place": place,
+            "desc": desc, "photos": photos[:10], "url": url}
 
-def headline(sess, d):
-    src = scrub((d["title"] or "").strip())
+# ---------- текст ----------
+
+def headline(sess, e, d):
+    src = scrub((e.get("title") or (d["title"] if d else "")).strip())
     t = scrub(translate(sess, src).strip())
     if is_translit_hy(src) or is_translit_hy(t):
         return ""
     if t and (has_cyr(t) or script(t) == "lat"):
         return " ".join(t.split())[:90]
-    alt = scrub(translate(sess, d["desc"][:300]).strip())
+    alt = scrub(translate(sess, d["desc"][:300]).strip()) if d else ""
     if has_cyr(alt) and len(alt.split()) >= 3:
         return re.split(r"[.!?]\s", alt)[0].strip()[:90]
     return " ".join((t or alt).split())[:90]
 
-def make_caption(sess, d):
-    head = headline(sess, d)
+def caption(sess, e, d):
+    head = headline(sess, e, d)
     if not head:
         return ""
     lines = [head]
-    if d["price"]:
-        lines.append(d["price"])
-    if d["place"]:
-        lines.append(d["place"])
-    if d["desc"]:
-        lines.append(scrub(translate(sess, d["desc"][:700])))
+    price = e.get("price") or (d["price"] if d else "")
+    place = e.get("place") or (d["place"] if d else "")
+    desc = scrub(d["desc"]) if d else ""
+    if price:
+        lines.append(price)
+    if place:
+        lines.append(place)
+    if desc:
+        lines.append(scrub(translate(sess, desc)))
     lines = [" ".join(scrub(x).split()) for x in lines if x]
     return "\n\n".join(lines)[:1024]
 
-def send(sess, d, caption):
+# ---------- Telegram ----------
+
+def send(sess, d, cap):
     markup = {"inline_keyboard": [[{"text": "Связаться", "url": d["url"]}]]}
     photos = d["photos"]
 
     if len(photos) >= 2:
-        media = [{"type": "photo", "media": photos[0], "caption": caption}]
+        media = [{"type": "photo", "media": photos[0], "caption": cap}]
         for p in photos[1:10]:
             media.append({"type": "photo", "media": p})
         r = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendMediaGroup",
@@ -198,15 +382,13 @@ def send(sess, d, caption):
                             "media": json.dumps(media, ensure_ascii=False)},
                       timeout=60)
         print("telegram album:", r.status_code, r.text[:200])
-
         if not r.ok:
-            payload = {"chat_id": CHAT_ID, "photo": photos[0],
-                       "caption": caption, "reply_markup": json.dumps(markup)}
             r1 = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendPhoto",
-                           data=payload, timeout=40)
+                           data={"chat_id": CHAT_ID, "photo": photos[0],
+                                 "caption": cap,
+                                 "reply_markup": json.dumps(markup)}, timeout=40)
             print("telegram fallback:", r1.status_code, r1.text[:200])
-            return bool(r1.ok)
-
+            return r1.ok
         mid = None
         try:
             res = r.json().get("result") or []
@@ -214,7 +396,6 @@ def send(sess, d, caption):
                 mid = res[0]["message_id"]
         except Exception:
             mid = None
-
         payload = {"chat_id": CHAT_ID, "text": "Связаться с продавцом",
                    "reply_markup": json.dumps(markup)}
         if mid:
@@ -227,145 +408,158 @@ def send(sess, d, caption):
     payload = {"chat_id": CHAT_ID, "reply_markup": json.dumps(markup)}
     if photos:
         payload["photo"] = photos[0]
-        payload["caption"] = caption
+        payload["caption"] = cap
         method = "sendPhoto"
     else:
-        payload["text"] = caption
+        payload["text"] = cap
         method = "sendMessage"
-
     r = sess.post(f"https://api.telegram.org/bot{TOKEN}/{method}",
                   data=payload, timeout=40)
-    print("telegram:", r.status_code, r.text[:200])
+    print("telegram:", r.status_code, r.text[:300])
     return bool(r.ok)
 
-def load():
+# ---------- состояние ----------
+
+def load_st():
     if os.path.exists(STATE):
         try:
             return json.load(open(STATE, encoding="utf-8"))
         except Exception as e:
-            print("state-gortsarq.json не читается:", e)
-    return {"queue": [], "last_publish": 0, "published": {}, "failed": {}}
-
-def save(st):
-    json.dump(st, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
+            print("state-ivi.json не читается:", e)
+    return {}
 
 def norm_queue(st):
-    """Очередь — словари {id, path, date}; старые строки-пути тоже принимаем."""
+    """Очередь хранится словарями; старый формат [id, url, ts] тоже принимаем."""
     q = []
     for e in st.get("queue", []):
-        if isinstance(e, dict) and e.get("path"):
-            p = str(e["path"]).split("]")[0].split(")")[0]
-            iid = str(e.get("id") or "")
-            if not iid:
-                m = ITEM_ID_RE.search(p)
-                iid = m.group(1) if m else p
-            q.append({"id": iid, "path": p, "date": e.get("date", "")})
-        elif isinstance(e, str):
-            p = e.split("]")[0].split(")")[0]
-            m = ITEM_ID_RE.search(p)
-            q.append({"id": m.group(1) if m else p, "path": p, "date": ""})
+        if isinstance(e, dict) and e.get("id"):
+            q.append(e)
+        elif isinstance(e, (list, tuple)) and len(e) >= 3:
+            q.append({"id": e[0], "url": e[1], "ts": int(e[2]),
+                      "title": "", "price": ""})
     st["queue"] = q
 
-def norm_published(st):
-    """Старые отметки времени превращаем в дату обновления (ДД.ММ.ГГГГ)."""
-    pub = st.get("published") or {}
-    for k, v in list(pub.items()):
-        if isinstance(v, (int, float)):
-            pub[k] = time.strftime("%d.%m.%Y", time.gmtime(v + 4 * 3600))
-    st["published"] = pub
+def collect(sess, slug, st):
+    """Все карточки раздела, страница за страницей, пока идут новые."""
+    seen = {}
+    for page in range(1, MAX_PAGES + 1):
+        url = f"{BASE}/ru/search/{slug}/" if page == 1 else f"{BASE}/ru/search/{slug}/?page={page}"
+        h = fetch(sess, url)
+        if not h:
+            break
+        cards = card_scan(h, slug, PER_CAT)
+        new = 0
+        for iid, c in cards.items():
+            if iid not in seen:
+                seen[iid] = c
+                new += 1
+        print(f"  стр.{page}: карточек {len(cards)}, новых {new}")
+        if new == 0 or len(seen) >= PER_CAT:
+            break
+        time.sleep(1)
+    return seen
 
 def main():
-    st = load()
-    st.setdefault("failed", {})
-    st.setdefault("published", {})
-    st.setdefault("last_publish", 0)
-    norm_queue(st)
-    norm_published(st)
-    sess = requests.Session()
-
-    if RESET_ONCE and not st.get("reset_done2"):
-        st["queue"] = []
-        st["failed"] = {}
-        st["reset_done2"] = True
-        print("очистка: очередь сброшена")
-
-    items = get_items(sess)
-    print("всего найдено:", len(items))
-
-    if TEST:
-        for iid, it in list(items.items())[:1]:
-            d = item_data(sess, it["path"])
-            if d:
-                print("фото:", len(d["photos"]), "заголовок:", d["title"])
+    if not TOKEN or not CHAT_ID:
+        print("нет TELEGRAM_TOKEN / TELEGRAM_CHAT_ID")
         return 0
 
-    ok_dates = last_days(FRESH_DAYS)
-    fresh = []
-    for iid, it in items.items():
-        if not it["date"]:
-            it["date"] = today_str()      # без даты на карточке считаем сегодняшним
-        if it["date"] not in ok_dates:
-            continue                      # старше недели — не берём вовсе
-        if st["published"].get(it["path"]) == it["date"]:
-            continue                      # выходило с этой же датой обновления
-        fresh.append({"id": iid, "path": it["path"], "date": it["date"]})
+    st = load_st()
+    st.setdefault("published", {})   # id -> время обновления объявления
+    st.setdefault("failed", {})
+    st.setdefault("last_publish", 0)
+    norm_queue(st)
 
-    if fresh:
-        st["queue"].extend(fresh)
-        print("новых в очередь:", len(fresh))
-        while len(st["queue"]) > QUEUE_MAX:
-            st["queue"].pop(0)
-
+    sess = requests.Session()
     now = time.time()
-    print("свежих за неделю:", len(fresh), "| очередь:", len(st["queue"]))
 
-    done = 0
-    if st["queue"] and now - st["last_publish"] >= INTERVAL:
-        for _ in range(3):
-            if not st["queue"] or done >= 1:
-                break
-            e = st["queue"].pop(0)
-            iid, path = e["id"], e["path"]
-            if st["published"].get(path) == e.get("date"):
-                continue                  # уже выходило с этой же датой
-            ok = False
-            d = None
-            try:
-                d = item_data(sess, path)
-                if d and not d["photos"]:
-                    print("  без фото, пропускаем:", iid)
-                    continue
-                cap = make_caption(sess, d) if d else ""
-                if d and not cap:
-                    print("  без заголовка (латиницей армянский или пусто), пропускаем:", iid)
-                    continue
-                ok = bool(cap) and bool(d["photos"]) and send(sess, d, cap)
-            except Exception as ex:
-                print("ошибка публикации:", ex)
-                ok = False
+    # 1. все объявления, обновлённые за последнюю неделю
+    for slug, name in SECTIONS.items():
+        cards = collect(sess, slug, st)
+        fresh = [c for c in cards.values() if is_fresh(c["ts"])]
+        print(f"[{slug}] {name}: карточек {len(cards)}, свежих за {FRESH_H}ч {len(fresh)}")
+        for c in list(cards.values())[:SAMPLE]:
+            print(f"    {c['id']}: «{c['title']}» {c['price']} "
+                  f"обновлено «{c['updated_txt']}» свежее={is_fresh(c['ts'])}")
+        in_queue = {e["id"]: e for e in st["queue"]}
+        for c in fresh:
+            ts = int(c["ts"])
+            prev = st["published"].get(c["id"])
+            if prev and prev >= ts:
+                continue                  # выходило и с тех пор не обновлялось
+            if c["id"] in in_queue:
+                if in_queue[c["id"]].get("ts", 0) >= ts:
+                    continue              # уже стоит в очереди с тем же обновлением
+                in_queue[c["id"]].update(ts=ts, title=c["title"], price=c["price"])
+                continue                  # объявление обновили — очередь возьмёт его снова
+            st["queue"].append({"id": c["id"], "url": c["url"], "ts": ts,
+                                "title": c["title"], "price": c["price"]})
+        time.sleep(1)
 
-            if ok:
-                st["last_publish"] = now
-                st["published"][path] = e.get("date") or today_str()
-                led_add(SITE, iid, now)
-                done += 1
-                print(f"опубликовано: {iid} ({path}) фото {len(d['photos'])}")
-                break
+    # 2. старое выкидываем, хвост очереди ограничиваем
+    far = time.time() - FRESH_H * 3600
+    st["queue"] = [e for e in st["queue"] if e.get("ts", 0) >= far]
+    while len(st["queue"]) > QUEUE_MAX:
+        st["queue"].pop(0)
+    print("в очереди:", len(st["queue"]))
 
-            st["failed"][path] = st["failed"].get(path, 0) + 1
-            if st["failed"][path] < 2:
+    if TEST:
+        for e in st["queue"][:3]:
+            print("---", e["url"])
+        return 0
+
+    # 3. публикация — ровно один пост за запуск
+    done, tried = 0, 0
+    while st["queue"] and done < PUBLISH_MAX and tried < PUBLISH_MAX * 3:
+        if not TEST and now - st["last_publish"] < INTERVAL:
+            print("ждём интервал между публикациями")
+            break
+        tried += 1
+        e = st["queue"].pop(0)
+        iid, url = e["id"], e["url"]
+        prev = st["published"].get(iid)
+        if prev and prev >= int(e.get("ts") or 0):
+            continue                      # уже выходило, обновления не было
+        d = None
+        try:
+            d = item_data(sess, url, iid)
+        except Exception as ex:
+            print("ошибка разбора:", ex)
+        if not d:
+            print("  страница не открылась, пропускаем:", iid)
+            continue
+        if not d["photos"]:
+            print("  без фото, пропускаем:", iid)
+            continue
+        cap = caption(sess, e, d)
+        if not cap:
+            print("  без заголовка (латиницей армянский или пусто), пропускаем:", iid)
+            continue
+        ok = bool(send(sess, d, cap))
+        if ok:
+            st["published"][iid] = int(e.get("ts") or now)
+            st["last_publish"] = now
+            led_add(SITE, iid, now)
+            done += 1
+            print("опубликовано:", iid, f"фото {len(d['photos'])}")
+        else:
+            st["failed"][iid] = st["failed"].get(iid, 0) + 1
+            if st["failed"][iid] < 2:
                 st["queue"].append(e)
-                print(f"  вернём в конец очереди: {path}")
+                print("  вернём в конец очереди:", iid)
             else:
-                print(f"  брошен {path}: не удалось 2 раза")
+                print("  брошен:", iid)
 
     if len(st["published"]) > 50000:
-        keys = list(st["published"])[-20000:]
-        st["published"] = {k: st["published"][k] for k in keys}
+        keep = list(st["published"])[-20000:]
+        st["published"] = {k: st["published"][k] for k in keep}
+    if len(st["failed"]) > 5000:
+        st["failed"] = {}
 
-    save(st)
-    today = today_str()
-    n_today = sum(1 for v in st["published"].values() if str(v) == today)
+    json.dump(st, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
+    today = time.strftime("%d.%m.%Y", time.gmtime(time.time() + 4 * 3600))
+    n_today = sum(1 for v in st["published"].values()
+                  if time.strftime("%d.%m.%Y", time.gmtime(int(v) + 4 * 3600)) == today)
     print(f"готово, публикаций за запуск: {done} | сегодня всего: {n_today}")
     return done
 
