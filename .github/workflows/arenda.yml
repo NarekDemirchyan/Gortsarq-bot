@@ -26,23 +26,10 @@ jobs:
           pip install requests markdownify playwright
           python -m playwright install --with-deps chromium
 
-      - name: Fix code
+      - name: Check syntax
         run: |
-          for f in is_empty card_block make_caption button_message send load save next_candidate publish main; do
-            sed -i "s/^[[:space:]]\+def $f(/def $f(/" arenda.py
-          done
-          sed -i -E 's|^[[:space:]]*ESTATE_LIST[[:space:]]*=.*|ESTATE_LIST = []|' arenda.py
-          sed -i -E 's|^[[:space:]]*MY_LIST[[:space:]]*=.*|MY_LIST = []|' arenda.py
-          sed -i -E 's|^[[:space:]]*ORDER[[:space:]]*=.*|ORDER = ["list"]|' arenda.py
-          sed -i -E 's|^[[:space:]]*INTERVAL[[:space:]]*=.*|INTERVAL = 7 * 60|' arenda.py
-          sed -i -E 's@^[[:space:]]*(QUEUE_MAX|MAX_QUEUE|QUEUE_LIMIT)[[:space:]]*=.*@\1 = 500@' arenda.py
-          grep -n -E '^[[:space:]]*(LIST_CATS|ESTATE_LIST|MY_LIST|ORDER|INTERVAL)' arenda.py
-          grep -n -E '^[[:space:]]*(QUEUE_MAX|MAX_QUEUE|QUEUE_LIMIT)' arenda.py || echo "QUEUE_MAX not found"
           python -c "import ast;ast.parse(open('arenda.py',encoding='utf-8').read());print('syntax ok')"
-
-      - name: Clean queue
-        run: |
-          python -c "import json,os;p='state-arenda.json';st=json.load(open(p,encoding='utf-8')) if os.path.exists(p) else None;q=(st or {}).get('queue',[]);keep=[i for i in q if i.get('src')=='list'];(st is not None and len(keep)!=len(q)) and (st.__setitem__('queue',keep),json.dump(st,open(p,'w',encoding='utf-8'),ensure_ascii=False),print('removed',len(q)-len(keep)))"
+          grep -n -E '^(CATS|INTERVAL|FRESH_DAYS)' arenda.py
 
       - name: Run arenda
         env:
@@ -59,4 +46,3 @@ jobs:
           git commit -m "state-arenda" || echo "no changes"
           git pull --rebase --autostash || true
           git push || true
-          
