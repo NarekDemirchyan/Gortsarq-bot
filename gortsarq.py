@@ -24,6 +24,7 @@ gortsarq.am -> Telegram («Барахолка Երևան»).
 на русский, не вышло — публикуем оригинал. Инфинитив вроде «Одеваться» заголовком
 не ставим. Армянское слово латиницей не публикуем. Без фото объявление пропускаем.
 Картинки скачиваем сами и загружаем файлом: по прямой ссылке Telegram их не тянет.
+Не скачалась картинка — публикацию откладываем, без снимка не выходим.
 Очередь перед публикацией перемешивается, чтобы разделы шли вперемешку.
 
 Знаки «<» и «>» в разборе страниц набраны кодом символа.
@@ -82,9 +83,9 @@ CATS = [
     "2328c-hobbi-hangist-ev-sport", # Հոբբի, հանգիստ և սպորտ
 ]
 
-ITEM_RE    = re.compile(r"""https://gortsarq\.am/ru/(\d+)p-[^)\]\s"'" + GT + r"]+""")
+ITEM_RE    = re.compile(r"""https://gortsarq\.am/ru/(\d+)p-[^)\]\s"'""" + GT + r"""]+""")
 ITEM_ID_RE = re.compile(r"/(\d+)p-")
-PHOTO_RE   = re.compile(r"""https://gortsarq\.am/images/detailed/\d+/[^)\]\s"'" + GT + r"]+""")
+PHOTO_RE   = re.compile(r"""https://gortsarq\.am/images/detailed/\d+/[^)\]\s"'""" + GT + r"""]+""")
 DATE_RE    = re.compile(r"\d{2}\.\d{2}\.\d{4}")
 
 # закрытый телефон: (0x xxx xxxx) и любые похожие наборы «x»
@@ -151,35 +152,67 @@ def fetch(sess, url):
     print("  чтение не удалось:", url)
     return ""
 
-def thumb_url(u):
-    """Мелкая версия снимка: полный размер слишком тяжёлый."""
-    return u.replace("/images/detailed/", "/images/thumbnails/480/480/detailed/")
+def thumb_urls(u):
+    """Варианты одного снимка: сначала мелкие, в самом конце полный."""
+    out = []
+    if "/images/detailed/" in u:
+        tail = u.split("/images/detailed/", 1)[1]
+        for size in ("480/480", "800/800", "1024/1024"):
+            out.append(f"{BASE}/images/thumbnails/{size}/detailed/{tail}")
+    out.append(u)
+    return out
 
-def bytes_from(sess, url):
-    """Байты картинки: прямой запрос, потом прокси. Пусто — значит не вышло."""
+def relay_urls(u):
+    """Обходной адрес: картинку забирает чужой сервер и отдаёт нам."""
+    bare = u.split("://", 1)[-1]
+    return [f"https://images.weserv.nl/?url={bare}"]
+
+def img_ok(r):
+    """Похоже на картинку: не ошибка, не пусто и не HTML."""
+    b = r.content or b""
+    if r.status_code != 200 or len(b) < 1200:
+        return False
+    return not b.lstrip()[:1] == b"<"
+
+def bytes_from(sess, url, ref):
+    """Байты картинки: прямо с Referer, потом открытые прокси, потом пересыльщик."""
+    h = dict(HDRS)
+    h["Referer"] = ref or BASE + "/"
+    h["Accept"] = "image/avif,image/webp,image/jpeg,image/*,*/*;q=0.8"
+
     try:
-        r = sess.get(url, headers=HDRS, timeout=30)
-        if r.status_code == 200 and len(r.content) > 3000 and r.content[:1] != b"<":
+        r = sess.get(url, headers=h, timeout=30)
+        if img_ok(r):
             return r.content
-        print(f"  картинка прямой {r.status_code}, {len(r.content)} байт")
+        print(f"  картинка прямо {r.status_code}, {len(r.content or b'')} байт")
     except Exception as e:
-        print(f"  картинка прямой сбой {type(e).__name__}")
+        print(f"  картинка прямо сбой {type(e).__name__}")
 
     for p in ("https://api.allorigins.win/raw", "https://api.codetabs.com/v1/proxy"):
         try:
-            r = sess.get(p, params={"url": url}, headers=HDRS, timeout=60)
-            if r.status_code == 200 and len(r.content) > 3000 and r.content[:1] != b"<":
+            r = sess.get(p, params={"url": url}, headers=h, timeout=60)
+            if img_ok(r):
                 print("  картинка прокси")
                 return r.content
             print(f"  картинка прокси {r.status_code}")
         except Exception as e:
             print(f"  картинка прокси сбой {type(e).__name__}")
+
+    for p in relay_urls(url):
+        try:
+            r = sess.get(p, headers=h, timeout=60)
+            if img_ok(r):
+                print("  картинка пересыльщик")
+                return r.content
+            print(f"  картинка пересыльщик {r.status_code}")
+        except Exception as e:
+            print(f"  картинка пересыльщик сбой {type(e).__name__}")
     return None
 
-def photo_bytes(sess, url):
-    """Скачиваем картинку сами. По ссылке Telegram её не тянет."""
-    for u in (thumb_url(url), url):
-        b = bytes_from(sess, u)
+def photo_bytes(sess, url, ref):
+    """Скачиваем снимок сами. По ссылке Telegram его не тянет."""
+    for u in thumb_urls(url):
+        b = bytes_from(sess, u, ref)
         if b:
             return b
     print("  фото не скачалось:", url)
@@ -302,23 +335,19 @@ def make_caption(sess, d):
 # ---------- Telegram ----------
 
 def send(sess, d, caption):
-    """Картинки грузим сами: по прямой ссылке Telegram их не тянет."""
+    """Картинки грузим сами: по прямой ссылке Telegram их не тянет.
+    Скачать не удалось — не публикуем, объявление вернётся в очередь."""
     markup = {"inline_keyboard": [[{"text": "Связаться", "url": d["url"]}]]}
 
     blobs = []
     for u in d["photos"][:3]:
-        b = photo_bytes(sess, u)
+        b = photo_bytes(sess, u, d["url"])
         if b:
             blobs.append(b)
 
     if not blobs:
-        print("  фото не скачались, пост без картинки")
-        r = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-                      data={"chat_id": CHAT_ID, "text": caption,
-                            "disable_web_page_preview": "true",
-                            "reply_markup": json.dumps(markup)}, timeout=40)
-        print("telegram:", r.status_code, r.text[:200])
-        return bool(r.ok)
+        print("  фото не скачались, публикацию откладываем")
+        return False
 
     if len(blobs) >= 2:
         files = {f"p{i}": (f"p{i}.jpg", b) for i, b in enumerate(blobs)}
@@ -347,6 +376,7 @@ def send(sess, d, caption):
                            data=payload, timeout=40)
             print("telegram кнопка:", r2.status_code, r2.text[:200])
             return bool(r2.ok)
+        print("  альбом не прошёл, пробуем одним снимком")
 
     r = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendPhoto",
                   data={"chat_id": CHAT_ID, "caption": caption,
