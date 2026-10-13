@@ -1,4 +1,4 @@
-name: name: gortsarq
+name: gortsarq
 
 on:
   workflow_dispatch:
