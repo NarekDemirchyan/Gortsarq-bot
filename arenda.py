@@ -42,7 +42,7 @@ FRESH_DAYS = 30           # սովորական ցիկլում՝ վերջին 30 
 MAX_PAGES = 20
 PER_CAT = 2000
 MAX_SECONDS = 15 * 60
-RESET_ONCE = True         # հին (list.am-ի) հերթը մեկ անգամ մաքրվում է
+RESET_ONCE = True         # հին հերթը մեկ անգամ մաքրվում է
 TEST = False
 
 BASE = "https://gortsarq.am"
