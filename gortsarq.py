@@ -23,9 +23,8 @@ gortsarq.am -> Telegram («Барахолка Երևան»).
 Закрытые телефоны вида «(0x xxx xxxx)» вырезаем. Заголовок и описание переводим
 на русский, не вышло — публикуем оригинал. Инфинитив вроде «Одеваться» заголовком
 не ставим. Армянское слово латиницей не публикуем. Без фото объявление пропускаем.
-Картинки скачиваем сами и загружаем файлом: по прямой ссылке Telegram их не тянет.
-Фото берём все, до десяти — больше Telegram в один альбом не принимает.
-Не скачалась картинка — публикацию откладываем, без снимка не выходим.
+Неудачное объявление (нет фото, страница не открылась) откладываем на DROPPED_HOLD
+и сразу идём к следующему, чтобы группа не молчала.
 Очередь перед публикацией перемешивается, чтобы разделы шли вперемешку.
 
 Знаки «<» и «>» в разборе страниц набраны кодом символа.
@@ -61,6 +60,9 @@ MAX_PAGES   = 20             # предохранитель по страниц�
 MAX_SECONDS = 15 * 60        # сколько секунд отдаём сбору, остальное — запас
 RESET_ONCE  = False          # однократный сброс очереди (уже сделан)
 TEST        = False
+
+DROPPED_HOLD = 6 * 3600      # сколько держим неудачное объявление в стороне
+TRIES        = 8             # сколько объявлений пробуем за один запуск
 
 BASE = "https://gortsarq.am"
 
@@ -152,72 +154,6 @@ def fetch(sess, url):
 
     print("  чтение не удалось:", url)
     return ""
-
-def thumb_urls(u):
-    """Варианты одного снимка: сначала мелкие, в самом конце полный."""
-    out = []
-    if "/images/detailed/" in u:
-        tail = u.split("/images/detailed/", 1)[1]
-        for size in ("480/480", "800/800", "1024/1024"):
-            out.append(f"{BASE}/images/thumbnails/{size}/detailed/{tail}")
-    out.append(u)
-    return out
-
-def relay_urls(u):
-    """Обходной адрес: картинку забирает чужой сервер и отдаёт нам."""
-    bare = u.split("://", 1)[-1]
-    return [f"https://images.weserv.nl/?url={bare}"]
-
-def img_ok(r):
-    """Похоже на картинку: не ошибка, не пусто и не HTML."""
-    b = r.content or b""
-    if r.status_code != 200 or len(b) < 1200:
-        return False
-    return not b.lstrip()[:1] == b"<"
-
-def bytes_from(sess, url, ref):
-    """Байты картинки: прямо с Referer, потом открытые прокси, потом пересыльщик."""
-    h = dict(HDRS)
-    h["Referer"] = ref or BASE + "/"
-    h["Accept"] = "image/avif,image/webp,image/jpeg,image/*,*/*;q=0.8"
-
-    try:
-        r = sess.get(url, headers=h, timeout=30)
-        if img_ok(r):
-            return r.content
-        print(f"  картинка прямо {r.status_code}, {len(r.content or b'')} байт")
-    except Exception as e:
-        print(f"  картинка прямо сбой {type(e).__name__}")
-
-    for p in ("https://api.allorigins.win/raw", "https://api.codetabs.com/v1/proxy"):
-        try:
-            r = sess.get(p, params={"url": url}, headers=h, timeout=60)
-            if img_ok(r):
-                print("  картинка прокси")
-                return r.content
-            print(f"  картинка прокси {r.status_code}")
-        except Exception as e:
-            print(f"  картинка прокси сбой {type(e).__name__}")
-
-    for p in relay_urls(url):
-        try:
-            r = sess.get(p, headers=h, timeout=60)
-            if img_ok(r):
-                print("  картинка пересыльщик")
-                return r.content
-            print(f"  картинка пересыльщик {r.status_code}")
-        except Exception as e:
-            print(f"  картинка пересыльщик сбой {type(e).__name__}")
-    return None
-
-def photo_bytes(sess, url, ref):
-    """Скачиваем снимок сами. По ссылке Telegram его не тянет."""
-    for u in thumb_urls(url):
-        b = bytes_from(sess, u, ref)
-        if b:
-            return b
-    print("  фото не скачалось:", url)
-    return None
 
 # ---------- разбор ----------
 
@@ -336,54 +272,55 @@ def make_caption(sess, d):
 # ---------- Telegram ----------
 
 def send(sess, d, caption):
-    """Картинки грузим сами: по прямой ссылке Telegram их не тянет.
-    Фото берём все, до десяти — больше Telegram в альбом не берёт.
-    Скачать не удалось — не публикуем, объявление вернётся в очередь."""
     markup = {"inline_keyboard": [[{"text": "Связаться", "url": d["url"]}]]}
+    photos = d["photos"]
 
-    blobs = []
-    for u in d["photos"][:10]:
-        b = photo_bytes(sess, u, d["url"])
-        if b:
-            blobs.append(b)
-
-    if not blobs:
-        print("  фото не скачались, публикацию откладываем")
-        return False
-
-    if len(blobs) >= 2:
-        files = {f"p{i}": (f"p{i}.jpg", b) for i, b in enumerate(blobs)}
-        media = [{"type": "photo", "media": "attach://p0", "caption": caption}]
-        for i in range(1, len(blobs)):
-            media.append({"type": "photo", "media": f"attach://p{i}"})
+    if len(photos) >= 2:
+        media = [{"type": "photo", "media": photos[0], "caption": caption}]
+        for p in photos[1:10]:
+            media.append({"type": "photo", "media": p})
         r = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendMediaGroup",
                       data={"chat_id": CHAT_ID,
                             "media": json.dumps(media, ensure_ascii=False)},
-                      files=files, timeout=120)
+                      timeout=60)
         print("telegram album:", r.status_code, r.text[:200])
 
-        if r.ok:
-            mid = None
-            try:
-                res = r.json().get("result") or []
-                if res:
-                    mid = res[0]["message_id"]
-            except Exception:
-                mid = None
-            payload = {"chat_id": CHAT_ID, "text": "Связаться с продавцом",
-                       "reply_markup": json.dumps(markup)}
-            if mid:
-                payload["reply_parameters"] = json.dumps({"message_id": mid})
-            r2 = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+        if not r.ok:
+            payload = {"chat_id": CHAT_ID, "photo": photos[0],
+                       "caption": caption, "reply_markup": json.dumps(markup)}
+            r1 = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendPhoto",
                            data=payload, timeout=40)
-            print("telegram кнопка:", r2.status_code, r2.text[:200])
-            return bool(r2.ok)
-        print("  альбом не прошёл, пробуем одним снимком")
+            print("telegram fallback:", r1.status_code, r1.text[:200])
+            return bool(r1.ok)
 
-    r = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendPhoto",
-                  data={"chat_id": CHAT_ID, "caption": caption,
-                        "reply_markup": json.dumps(markup)},
-                  files={"photo": ("p.jpg", blobs[0])}, timeout=90)
+        mid = None
+        try:
+            res = r.json().get("result") or []
+            if res:
+                mid = res[0]["message_id"]
+        except Exception:
+            mid = None
+
+        payload = {"chat_id": CHAT_ID, "text": "Связаться с продавцом",
+                   "reply_markup": json.dumps(markup)}
+        if mid:
+            payload["reply_parameters"] = json.dumps({"message_id": mid})
+        r2 = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+                       data=payload, timeout=40)
+        print("telegram кнопка:", r2.status_code, r2.text[:200])
+        return bool(r.ok and r2.ok)
+
+    payload = {"chat_id": CHAT_ID, "reply_markup": json.dumps(markup)}
+    if photos:
+        payload["photo"] = photos[0]
+        payload["caption"] = caption
+        method = "sendPhoto"
+    else:
+        payload["text"] = caption
+        method = "sendMessage"
+
+    r = sess.post(f"https://api.telegram.org/bot{TOKEN}/{method}",
+                  data=payload, timeout=40)
     print("telegram:", r.status_code, r.text[:200])
     return bool(r.ok)
 
@@ -395,7 +332,7 @@ def load():
             return json.load(open(STATE, encoding="utf-8"))
         except Exception as e:
             print("state-gortsarq.json не читается:", e)
-    return {"queue": [], "last_publish": 0, "published": {}, "failed": {}}
+    return {"queue": [], "last_publish": 0, "published": {}, "failed": {}, "dropped": {}}
 
 def save(st):
     json.dump(st, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
@@ -439,14 +376,14 @@ def publish_one(sess, st, e, now):
     except Exception as ex:
         print("ошибка разбора:", ex)
     if not d:
-        print("  страница не открылась, пропускаем:", iid)
+        print("  страница не открылась, откладываем:", iid)
         return "drop"
     if not d["photos"]:
-        print("  без фото, пропускаем:", iid)
+        print("  без фото, откладываем:", iid)
         return "drop"
     cap = make_caption(sess, d)
     if not cap:
-        print("  без заголовка (латиницей армянский или пусто), пропускаем:", iid)
+        print("  без заголовка (латиницей армянский или пусто), откладываем:", iid)
         return "drop"
     if send(sess, d, cap):
         st["last_publish"] = now
@@ -456,10 +393,10 @@ def publish_one(sess, st, e, now):
         return "ok"
     return "fail"
 
-def publish_phase(sess, st, now, limit=1):
-    """Публикуем из очереди: не больше limit постов, не больше трёх попыток."""
+def publish_phase(sess, st, now, limit=1, tries=TRIES):
+    """Публикуем из очереди: не больше limit постов, до tries попыток за запуск."""
     done, tried = 0, 0
-    while st["queue"] and done < limit and tried < 3:
+    while st["queue"] and done < limit and tried < tries:
         if now - st["last_publish"] < INTERVAL:
             print("ждём интервал между публикациями")
             break
@@ -476,6 +413,9 @@ def publish_phase(sess, st, now, limit=1):
                 print(f"  вернём в конец очереди: {path}")
             else:
                 print(f"  брошен {path}: не удалось 2 раза")
+        elif res == "drop":
+            st["dropped"][e["path"]] = now
+            print(f"  отложен на {DROPPED_HOLD // 3600} ч: {e['path']}")
     return done
 
 def main():
@@ -483,6 +423,7 @@ def main():
     st.setdefault("failed", {})
     st.setdefault("published", {})
     st.setdefault("last_publish", 0)
+    st.setdefault("dropped", {})
     norm_queue(st)
     norm_published(st)
     sess = requests.Session()
@@ -519,6 +460,8 @@ def main():
             continue                      # старше недели — не берём вовсе
         if st["published"].get(it["path"]) == it["date"]:
             continue                      # выходило с этой же датой обновления
+        if now - st["dropped"].get(it["path"], 0) < DROPPED_HOLD:
+            continue                      # недавно отложили — не берём снова
         fresh.append({"id": iid, "path": it["path"], "date": it["date"]})
 
     if fresh:
