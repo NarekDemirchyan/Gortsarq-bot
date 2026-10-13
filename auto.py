@@ -223,7 +223,15 @@ def main():
     st = load()
     st.setdefault("seen", {})
     if isinstance(st["seen"], list):          # старый формат — просто список номеров
-        st["seen"] = {i: today_iso() for i in st["seen"]}
+        st["seen"] = {i: "" for i in st["seen"]}
+    if st.get("seen_ver", 1) < 2:
+        # снимаем метку, которую поставила прошлая версия: дата «сегодня»
+        # у неизвестных объявлений означала «дата не менялась» и глушила обновления
+        n = sum(1 for v in st["seen"].values() if v == today_iso())
+        st["seen"] = {k: ("" if v == today_iso() else v)
+                      for k, v in st["seen"].items()}
+        st["seen_ver"] = 2
+        print("снята метка старого формата:", n)
     st.setdefault("queue", [])
     st.setdefault("failed", {})
     st.setdefault("published", {})
