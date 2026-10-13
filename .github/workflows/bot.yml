@@ -1,4 +1,4 @@
-name: listam bot
+name: name: gortsarq
 
 on:
   workflow_dispatch:
