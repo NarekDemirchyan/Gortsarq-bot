@@ -535,11 +535,12 @@ def main():
     now = time.time()
     deadline = now + MAX_SECONDS
 
-    if RESET_ONCE and not st.get("reset_nedv"):
+    if RESET_ONCE and st.get("reset_nedv") != 2:
         st["queue"] = []
         st["failed"] = {}
         st["published"] = {}
-        st["reset_nedv"] = True
+        st["last_publish"] = 0
+        st["reset_nedv"] = 2
         print("մաքրում. հին հերթը դատարկվեց")
 
     done = publish_phase(sess, st, now, 1)
