@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Этот файл бот загружает первым (см. bot.yml), до остальной работы.
-Четыре задачи.
+Три задачи.
 
 1. Ключ Jina. Читалка r.jina.ai в браузерном режиме открывает страницы,
    которые без ключа отдают проверку защиты. Ключ лежит в секрете JINA_KEY
@@ -11,15 +11,7 @@
    Если ответ слабый — ошибка, проверка защиты или почти пустой текст —
    запрос повторяется до трёх раз с паузой.
 
-3. Чистка ivi.am. На страницах ivi.am вместе с текстом лежат скрипты
-   (счётчики, реклама) и служебный блок продавца: ссылки на профиль,
-   аватар, строка о регистрации. Бот убирает теги, но текст внутри script
-   остаётся и попадает в описание объявления. Здесь код и стили вырезаются
-   из ответа ещё до разбора, служебные ссылки, картинки, адреса и строки
-   продавца вычищаются, а адреса фотографий объявления собираются
-   из ответа до вырезания и возвращаются в начало — иначе они пропадают.
-
-4. Альбом без повторов. list.am отдаёт одну фотографию в разных размерах,
+3. Альбом без повторов. list.am отдаёт одну фотографию в разных размерах,
    бот собирает галерею по имени файла и берёт обе. Здесь альбом
    пересобирается по номеру фотографии: повтор убирается, из вариантов
    остаётся полный (папка f). Если остаётся один снимок, альбом отправлять
@@ -42,22 +34,8 @@ except Exception:
 JINA = "https://r.jina.ai/"
 KEY = os.environ.get("JINA_KEY", "")
 PAGES = ("list.am", "gortsarq")
-CLEAN_HOSTS = ("ivi.am",)
 BLOCK_WORDS = ("security verification", "just a moment", "cf-chl",
                "attention required", "captcha", "проверка безопасности")
-SCRIPT_RE = re.compile(r"<(script|style|noscript)[^>]*>.*?</\1\s*>", re.S | re.I)
-COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
-ITEM_IMG_RE = re.compile(
-    r"(?:https?:(?:\\?/){2}ivi\.am)?(?:\\?/)+files(?:\\?/)+images(?:\\?/)+items"
-    r"(?:\\?/)+[^\s\"'<>]+?\.(?:jpg|jpeg|png|webp)", re.I)
-MD_LINK_RE = re.compile(r"\[[^\]]*\]\(\s*[^)]*\)", re.S)
-BRACKET_RE = re.compile(r"[\[\]]")
-IMG_TAG_RE = re.compile(r"<img[^>]*>", re.I)
-A_TAG_RE = re.compile(r"</?a\b[^>]*>", re.I)
-SELLER_RE = re.compile(r"частное лицо на сайте с[^<]*?20\d\d", re.I)
-URL_RE = re.compile(r"https?://(?:www\.)?ivi\.am/\S+")
-SPACES_RE = re.compile(r"[ \t]{2,}")
-HEADING_RE = re.compile(r"^#{1,6}\s*", re.M)
 TRIES = 3
 
 # ---------- ключ Jina ----------
@@ -91,72 +69,13 @@ def _read(sess, old, url, kw):
         last = old(sess, url, **kw)
         if not _weak(last):
             if n:
-                print("  джина: прочитано со", n + 1, "раза")
+                print(" джина: прочитано со", n + 1, "раза")
             return last
-        print("  джина: слабый ответ", getattr(last, "status_code", "?"),
+        print(" джина: слабый ответ", getattr(last, "status_code", "?"),
               "-> повтор", n + 1)
         if n < TRIES - 1:
             time.sleep(4 + 4 * n)
     return last
-
-# ---------- чистка ivi.am ----------
-
-def _photos(body, url):
-    """Адреса фотографий объявления: сначала по номеру объявления."""
-    out = []
-    tail = url.split("/ru/item/", 1)[1] if "/ru/item/" in url else ""
-    nums = re.findall(r"\d{4,}", tail)
-    iid = nums[-1] if nums else ""
-    for m in ITEM_IMG_RE.finditer(body):
-        u = m.group(0).replace("\\/", "/")
-        if u.startswith("/"):
-            u = "https://ivi.am" + u
-        if u in out:
-            continue
-        if iid and iid in u:
-            out.append(u)
-    if not out:
-        for m in ITEM_IMG_RE.finditer(body[:60000]):
-            u = m.group(0).replace("\\/", "/")
-            if u.startswith("/"):
-                u = "https://ivi.am" + u
-            if u not in out:
-                out.append(u)
-            if len(out) >= 6:
-                break
-    return out
-
-def _strip(clean):
-    """Убрать служебный мусор: ссылки, картинки, адреса, блок продавца."""
-    clean = MD_LINK_RE.sub(" ", clean)
-    clean = A_TAG_RE.sub(" ", clean)
-    clean = IMG_TAG_RE.sub(" ", clean)
-    clean = URL_RE.sub(" ", clean)
-    clean = SELLER_RE.sub(" ", clean)
-    clean = BRACKET_RE.sub(" ", clean)
-    clean = HEADING_RE.sub("", clean)
-    return SPACES_RE.sub(" ", clean)
-
-def _trim(r, url=""):
-    """Убрать код, стили и служебные ссылки, но сохранить фотографии."""
-    try:
-        body = getattr(r, "text", "") or ""
-        if len(body) < 3000 or "script" not in body.lower():
-            return r
-        saved = _photos(body, url) if "/ru/item/" in url else []
-        clean = SCRIPT_RE.sub(" ", body)
-        clean = COMMENT_RE.sub(" ", clean)
-        clean = _strip(clean)
-        if len(clean) < 2000:
-            return r
-        if saved:
-            clean = " ".join('<img src="%s">' % u for u in saved[:10]) + " " + clean
-        r._content = clean.encode("utf-8", "replace")
-        print("  ivi: код убран, знаков", len(body), "->", len(clean),
-              "| фото", len(saved))
-    except Exception as e:
-        print("  ivi: чистка не вышла:", type(e).__name__)
-    return r
 
 # ---------- альбом без повторов ----------
 
@@ -200,7 +119,7 @@ def _names(items):
 class _Answer(object):
     """Ответ, который видит бот, когда снимок ушёл обычным сообщением."""
 
-    def init(self, code, text):
+    def __init__(self, code, text):
         self.status_code = code
         self.text = text
 
@@ -217,7 +136,7 @@ def _one_photo(sess, old, url, data, one, timeout):
                "photo": one.get("media"),
                "caption": one.get("caption") or ""}
     r = old(sess, place, data=payload, timeout=timeout)
-    print("  альбом: один снимок -> sendPhoto", r.status_code)
+    print(" альбом: один снимок -> sendPhoto", r.status_code)
     if not r.ok:
         return r
     mid = None
@@ -247,10 +166,8 @@ def _patch():
             else:
                 r = old_get(self, url, **kw)
         except Exception as e:
-            print("  чтение: сбой повтора:", type(e).__name__)
+            print(" чтение: сбой повтора:", type(e).__name__)
             r = old_get(self, url, **kw)
-        if any(h in str(url) for h in CLEAN_HOSTS):
-            r = _trim(r, str(url))
         return r
 
     def post(self, url, data=None, json=None, **kw):
@@ -259,16 +176,16 @@ def _patch():
                 raw = (data or {}).get("media")
                 items = json.loads(raw) if isinstance(raw, str) else None
                 if isinstance(items, list):
-                    print("  альбом: фото", len(items), "->", _names(items))
+                    print(" альбом: фото", len(items), "->", _names(items))
                     fixed = _clean(items)
                     if len(fixed) == 1:
                         return _one_photo(self, old_post, url, data, fixed[0],
                                           kw.get("timeout", 60))
                     if len(fixed) != len(items):
-                        print("  альбом: убрано повторов", len(items) - len(fixed))
-                        data = dict(data, media=json.dumps(fixed, ensure_ascii=False))
+                        print(" альбом: убрано повторов", len(items) - len(fixed))
+                    data = dict(data, media=json.dumps(fixed, ensure_ascii=False))
             except Exception as e:
-                print("  альбом: правка не вышла:", type(e).__name__)
+                print(" альбом: правка не вышла:", type(e).__name__)
         return old_post(self, url, data=data, json=json, **kw)
 
     requests.Session.get = get
