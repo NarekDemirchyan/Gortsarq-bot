@@ -186,6 +186,15 @@ def specs(md):
                 if val and len(val) <= 45 and val not in LABELS:
                     out[key] = val
                 break
+    # պահուստ՝ եթե էջում պիտակն ու արժեքը մի տողում են
+    for lab, key in LABELS.items():
+        if key in out:
+            continue
+        m = re.search(re.escape(lab) + r"\s*:?\s*\n?\s*([^\n|]{1,45})", md)
+        if m:
+            val = m.group(1).strip(" :|–—-*")
+            if val and not any(val.startswith(x) for x in LABELS if x != lab):
+                out[key] = val
     return out
 
 def item_data(sess, path, kind):
