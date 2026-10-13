@@ -12,6 +12,9 @@ arenda.py — Անշարժ գույք (gortsarq.am → Telegram).
 
 Քարտի դաշտերը գալիս են էջի բնութագրերից։ Հեռախոսը գործարքի էջում փակ է,
 դրա համար միշտ կցվում է «Связываться» կոճակը։
+
+Նկարները ներբեռնում ենք ինքներս ու ուղարկում ֆայլով. ուղիղ հղումով Telegram-ը
+դրանք չի քաշում։ Նկար չստացվեց՝ գրառումը չի հրապարակվում ու վերադառնում է հերթ։
 """
 import os
 import re
@@ -42,7 +45,7 @@ FRESH_DAYS = 30           # սովորական ցիկլում՝ վերջին 30 
 MAX_PAGES = 20
 PER_CAT = 2000
 MAX_SECONDS = 15 * 60
-RESET_ONCE = True         # հին հերթը մեկ անգամ մաքրվում է
+RESET_ONCE = True         # հին (list.am-ի) հերթը մեկ անգամ մաքրվում է
 TEST = False
 
 BASE = "https://gortsarq.am"
@@ -153,6 +156,72 @@ def fetch(sess, url):
             pass
     print(" չբացվեց:", url)
     return ""
+
+def thumb_urls(u):
+    """Մեկ նկարի տարբերակները՝ սկզբում մանրը, վերջում՝ ամբողջականը։"""
+    out = []
+    if "/images/detailed/" in u:
+        tail = u.split("/images/detailed/", 1)[1]
+        for size in ("480/480", "800/800", "1024/1024"):
+            out.append(f"{BASE}/images/thumbnails/{size}/detailed/{tail}")
+    out.append(u)
+    return out
+
+def relay_urls(u):
+    """Շրջանցիկ հասցե. նկարը վերցնում է ուրիշ սերվեր ու տալիս մեզ։"""
+    bare = u.split("://", 1)[-1]
+    return [f"https://images.weserv.nl/?url={bare}"]
+
+def img_ok(r):
+    """Նման է նկարի՝ ոչ սխալ, ոչ դատարկ ու ոչ HTML։"""
+    b = r.content or b""
+    if r.status_code != 200 or len(b) < 1200:
+        return False
+    return not b.lstrip()[:1] == b"<"
+
+def bytes_from(sess, url, ref):
+    """Նկարի բայթերը՝ ուղիղ Referer-ով, հետո proxy-ներով, հետո փոխանցիչով։"""
+    h = dict(HDRS)
+    h["Referer"] = ref or BASE + "/"
+    h["Accept"] = "image/avif,image/webp,image/jpeg,image/*,*/*;q=0.8"
+
+    try:
+        r = sess.get(url, headers=h, timeout=30)
+        if img_ok(r):
+            return r.content
+        print(f" նկար ուղիղ {r.status_code}, {len(r.content or b'')} բայթ")
+    except Exception as e:
+        print(f" նկար ուղիղ սխալ {type(e).__name__}")
+
+    for p in ("https://api.allorigins.win/raw", "https://api.codetabs.com/v1/proxy"):
+        try:
+            r = sess.get(p, params={"url": url}, headers=h, timeout=60)
+            if img_ok(r):
+                print(" նկար proxy")
+                return r.content
+            print(f" նկար proxy {r.status_code}")
+        except Exception as e:
+            print(f" նկար proxy սխալ {type(e).__name__}")
+
+    for p in relay_urls(url):
+        try:
+            r = sess.get(p, headers=h, timeout=60)
+            if img_ok(r):
+                print(" նկար փոխանցիչ")
+                return r.content
+            print(f" նկար փոխանցիչ {r.status_code}")
+        except Exception as e:
+            print(f" նկար փոխանցիչ սխալ {type(e).__name__}")
+    return None
+
+def photo_bytes(sess, url, ref):
+    """Նկարը ներբեռնում ենք ինքներս։ Ուղիղ հղումով Telegram-ը դա չի անում։"""
+    for u in thumb_urls(url):
+        b = bytes_from(sess, u, ref)
+        if b:
+            return b
+    print(" նկարը չներբեռնվեց:", url)
+    return None
 
 # ---------- էջի ընթերցում ----------
 
@@ -367,53 +436,54 @@ def make_caption(sess, d):
 # ---------- Telegram ----------
 
 def send(sess, d, caption):
+    """Նկարները ներբեռնում ենք ինքներս ու ուղարկում ֆայլով. ուղիղ հղումով Telegram-ը
+    դրանք չի քաշում։ Նկար չստացվեց՝ չենք հրապարակում, հայտարարությունը կվերադառնա հերթ։"""
     markup = {"inline_keyboard": [[{"text": "Связываться", "url": d["url"]}]]}
-    photos = d["photos"]
 
-    if len(photos) >= 2:
-        media = [{"type": "photo", "media": photos[0], "caption": caption,
+    blobs = []
+    for u in d["photos"][:10]:
+        b = photo_bytes(sess, u, d["url"])
+        if b:
+            blobs.append(b)
+
+    if not blobs:
+        print(" նկարները չներբեռնվեցին, հրապարակումը հետաձգվում է")
+        return False
+
+    if len(blobs) >= 2:
+        files = {f"p{i}": (f"p{i}.jpg", b) for i, b in enumerate(blobs)}
+        media = [{"type": "photo", "media": "attach://p0", "caption": caption,
                   "parse_mode": "HTML"}]
-        for p in photos[1:10]:
-            media.append({"type": "photo", "media": p})
+        for i in range(1, len(blobs)):
+            media.append({"type": "photo", "media": f"attach://p{i}"})
         r = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendMediaGroup",
                       data={"chat_id": CHAT_ID,
                             "media": json.dumps(media, ensure_ascii=False)},
-                      timeout=60)
+                      files=files, timeout=120)
         print(" ալբոմ:", r.status_code, r.text[:160])
-        if not r.ok:
-            r1 = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendPhoto",
-                           data={"chat_id": CHAT_ID, "photo": photos[0],
-                                 "caption": caption, "parse_mode": "HTML",
-                                 "reply_markup": json.dumps(markup)},
-                           timeout=40)
-            print(" մեկ նկարով:", r1.status_code, r1.text[:160])
-            return bool(r1.ok)
-        mid = None
-        try:
-            res = r.json().get("result") or []
-            if res:
-                mid = res[0]["message_id"]
-        except Exception:
+        if r.ok:
             mid = None
-        payload = {"chat_id": CHAT_ID, "text": "Связаться с продавцом",
-                   "reply_markup": json.dumps(markup)}
-        if mid:
-            payload["reply_parameters"] = json.dumps({"message_id": mid})
-        r2 = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-                       data=payload, timeout=40)
-        print(" կոճակ:", r2.status_code, r2.text[:160])
-        return bool(r.ok and r2.ok)
+            try:
+                res = r.json().get("result") or []
+                if res:
+                    mid = res[0]["message_id"]
+            except Exception:
+                mid = None
+            payload = {"chat_id": CHAT_ID, "text": "Связаться с продавцом",
+                       "reply_markup": json.dumps(markup)}
+            if mid:
+                payload["reply_parameters"] = json.dumps({"message_id": mid})
+            r2 = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+                           data=payload, timeout=40)
+            print(" կոճակ:", r2.status_code, r2.text[:160])
+            return bool(r2.ok)
+        print(" ալբոմը չանցավ, փորձում ենք մեկ նկարով")
 
-    payload = {"chat_id": CHAT_ID, "reply_markup": json.dumps(markup)}
-    if photos:
-        payload.update({"photo": photos[0], "caption": caption,
-                        "parse_mode": "HTML"})
-        method = "sendPhoto"
-    else:
-        payload.update({"text": caption, "parse_mode": "HTML"})
-        method = "sendMessage"
-    r = sess.post(f"https://api.telegram.org/bot{TOKEN}/{method}",
-                  data=payload, timeout=40)
+    r = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendPhoto",
+                  data={"chat_id": CHAT_ID, "caption": caption,
+                        "parse_mode": "HTML",
+                        "reply_markup": json.dumps(markup)},
+                  files={"photo": ("p.jpg", blobs[0])}, timeout=90)
     print(" ուղարկում:", r.status_code, r.text[:200])
     return bool(r.ok)
 
