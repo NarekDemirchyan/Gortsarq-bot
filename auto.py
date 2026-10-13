@@ -6,8 +6,8 @@ CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID_AUTO", "")
 
 STATE      = "state_auto.json"
 INTERVAL   = 12 * 60      # минимальный промежуток между публикациями (сек)
-QUEUE_MAX  = 250          # максимум объявлений в очереди
-FRESH_DAYS = 1            # берём только объявления за последние сутки
+QUEUE_MAX  = 2000         # максимум объявлений в очереди
+FRESH_DAYS = 7            # берём объявления за последние 7 суток
 RESET_ONCE = True         # однократный сброс очереди, сработает один раз
 TEST       = False
 
@@ -47,6 +47,9 @@ def fetch_sitemap(sess, url):
     except Exception as e:
         print("  sitemap ошибка:", type(e).__name__)
     return jina(sess, url)
+
+def today_iso():
+    return time.strftime("%Y-%m-%d", time.gmtime(time.time() + 4 * 3600))
 
 def last_days(n):
     # даты сайта (ГГГГ-ММ-ДД) за последние n суток по Еревану (UTC+4)
@@ -210,7 +213,7 @@ def send(sess, d, caption):
 def load():
     if os.path.exists(STATE):
         return json.load(open(STATE, encoding="utf-8"))
-    return {"seen": [], "queue": [], "last_publish": 0,
+    return {"seen": {}, "queue": [], "last_publish": 0,
             "published": {}, "failed": {}}
 
 def save(st):
@@ -218,7 +221,9 @@ def save(st):
 
 def main():
     st = load()
-    st.setdefault("seen", [])
+    st.setdefault("seen", {})
+    if isinstance(st["seen"], list):          # старый формат — просто список номеров
+        st["seen"] = {i: today_iso() for i in st["seen"]}
     st.setdefault("queue", [])
     st.setdefault("failed", {})
     st.setdefault("published", {})
@@ -239,22 +244,28 @@ def main():
         return
 
     ok_dates = last_days(FRESH_DAYS)
+    in_queue = set(st["queue"])
     fresh = []
     for iid, date in items:
-        if iid in st["seen"] or iid in st["published"]:
-            continue
-        st["seen"].append(iid)
         if date and date not in ok_dates:
-            continue                   # старше суток — не берём вовсе
+            continue                   # старше 7 суток — не берём вовсе
+        prev = st["seen"].get(iid, "")
+        if prev and (not date or date <= prev):
+            continue                   # уже знаем и дата не обновилась
+        st["seen"][iid] = date or prev or today_iso()
+        if iid in in_queue:
+            continue
         fresh.append(iid)
 
-    st["seen"] = st["seen"][-20000:]
+    if len(st["seen"]) > 20000:
+        keep = list(st["seen"])[-20000:]
+        st["seen"] = {k: st["seen"][k] for k in keep}
 
     if fresh:
         st["queue"].extend(fresh)
-        print("новых в очередь:", len(fresh))
-        while len(st["queue"]) > QUEUE_MAX:
-            st["queue"].pop(0)
+        print("новых и обновлённых в очередь:", len(fresh))
+    while len(st["queue"]) > QUEUE_MAX:
+        st["queue"].pop(0)
 
     now = time.time()
     print("очередь:", len(st["queue"]))
