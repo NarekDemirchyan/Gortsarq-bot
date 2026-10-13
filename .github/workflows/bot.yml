@@ -2,13 +2,6 @@ name: gortsarq
 
 on:
   workflow_dispatch:
-    inputs:
-      source:
-        description: "Кто публикует: auto / list / ivi / gortsarq"
-        required: false
-        default: auto
-        type: choice
-        options: [auto, list, ivi, gortsarq]
 
 permissions:
   contents: write
@@ -38,7 +31,6 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           JINA_KEY: ${{ secrets.JINA_KEY }}
-          SOURCE: ${{ inputs.source }}
         run: python -c "import usercustomize, runpy; runpy.run_path('run.py', run_name='__main__')"
 
       - name: Save state
