@@ -1008,3 +1008,155 @@ def union_caption(e):
     if not e.get("nick") and "unionapp.net/en/ad/" not in cap:
         cap = (cap + "\n\nhttps://unionapp.net/en/ad/" + str(e.get("id")))[:1024]
     return cap
+# ===== ԿԱՐԳԱՎՈՐՈՒՄ. արագություն, թարմություն, մեկ կրկնության կանոն =====
+MAX_TRIES   = 4            # քանի հայտարարություն ենք փորձում մեկ գրառման համար
+KEEP_DAYS   = 3            # որքան օրից հինը դուրս է գցվում
+QUEUE_KEEP  = 400          # որքանից ավելի հերթ չենք պահում
+_FAILS = [0]
+
+def fetch(sess, url):
+    """Ընթերցում՝ կարճ ու սահմանափակ. կրկնությունների երկար շղթա չկա։"""
+    if _FAILS[0] >= 8:
+        return ""
+    try:
+        r = sess.get(url, headers=HDRS, timeout=12)
+        if r.status_code == 200 and good(r.text):
+            _FAILS[0] = 0
+            return to_md(r.text, url)
+    except Exception:
+        pass
+    h = dict(HDRS)
+    h["x-engine"] = "browser"
+    if JINA_KEY:
+        h["Authorization"] = "Bearer " + JINA_KEY
+    try:
+        r = sess.get("https://r.jina.ai/" + url, headers=h, timeout=20)
+        if r.status_code == 200 and good(r.text):
+            _FAILS[0] = 0
+            return r.text
+    except Exception:
+        pass
+    for p in PROXIES[:2]:
+        try:
+            r = via_proxy(sess, p, url, HDRS, 15)
+            if r.status_code == 200 and good(r.text):
+                _FAILS[0] = 0
+                return to_md(r.text, url)
+        except Exception:
+            pass
+    _FAILS[0] += 1
+    print("  չկարդացվեց:", url)
+    return ""
+
+def bytes_from(sess, url, ref):
+    """Նկարը՝ ուղիղ, 2 պրոքսի, 1 հայելի։ Ամեն ինչ կարճ։"""
+    if _FAILS[0] >= 12:
+        return None
+    h = dict(HDRS)
+    h["Referer"] = ref or BASE + "/"
+    h["Accept"] = "image/avif,image/webp,image/jpeg,image/*,*/*;q=0.8"
+    try:
+        r = sess.get(url, headers=h, timeout=20)
+        if img_ok(r):
+            _FAILS[0] = 0
+            return r.content
+    except Exception:
+        pass
+    for p in PROXIES[:2]:
+        try:
+            r = via_proxy(sess, p, url, h, 25)
+            if img_ok(r):
+                return r.content
+        except Exception:
+            pass
+    for p in relay_urls(url)[:1]:
+        try:
+            r = sess.get(p, headers=h, timeout=25)
+            if img_ok(r):
+                return r.content
+        except Exception:
+            pass
+    _FAILS[0] += 1
+    return None
+
+def union_read(sess, url, raw=False):
+    """Union-ի լենտան՝ երկու կարճ փորձով։ Չստացվի՝ դատարկ։"""
+    if _FAILS[0] >= 8:
+        return ""
+    H = dict(HDRS)
+    H["Referer"] = "https://unionapp.net/"
+    H["x-engine"] = "browser"
+    if JINA_KEY:
+        H["Authorization"] = "Bearer " + JINA_KEY
+    try:
+        r = sess.get("https://r.jina.ai/" + url, headers=H, timeout=30)
+        if r.status_code == 200 and len(r.text) > 1000 and "does not exist" not in r.text:
+            _FAILS[0] = 0
+            print("union jina")
+            return r.text
+        print("union jina", r.status_code, len(r.text))
+    except Exception as ex:
+        print("union jina սխալ:", ex)
+    try:
+        r = sess.get(url, headers=HDRS, timeout=20)
+        if r.status_code == 200 and len(r.text) > 1500 and "does not exist" not in r.text:
+            _FAILS[0] = 0
+            return r.text
+    except Exception:
+        pass
+    _FAILS[0] += 1
+    print("union՝ չկարդացվեց:", url)
+    return ""
+def _date_key(d):
+    try:
+        dd, mm, yy = str(d or "").split(".")
+        return (int(yy), int(mm), int(dd))
+    except Exception:
+        return (0, 0, 0)
+
+def publish_phase(sess, st, now, limit=1):
+    """Հրապարակում ենք միայն թարմը՝ ամենանորը սկզբում։ Չորսից ավելի չենք փորձում։"""
+    ok_dates = last_days(KEEP_DAYS)
+    keep = [e for e in st["queue"] if e.get("date") in ok_dates]
+    gone = len(st["queue"]) - len(keep)
+    if gone:
+        print("հերթից դուրս եկան հինները:", gone)
+    keep.sort(key=lambda e: _date_key(e.get("date")), reverse=True)
+    st["queue"] = keep
+    done, tried = 0, 0
+    while st["queue"] and done < limit and tried < MAX_TRIES:
+        e = st["queue"].pop(0)
+        tried += 1
+        path = e["path"]
+        if st["published"].get(path) == e.get("date"):
+            continue
+        res = publish_one(sess, st, e, now)
+        if res == "ok":
+            done += 1
+            save(st)                  # անմիջապես՝ որ չեղարկումը մատյանը չկորցնի
+        elif res == "fail":
+            n = mark_failed(st, path, e.get("date"))
+            if n < 2:
+                st["queue"].append(e)
+    while len(st["queue"]) > QUEUE_KEEP:
+        st["queue"].pop()
+    return done
+
+def led_today():
+    """Այսօրվա գրառումները՝ և՛ Բարախոլկա, և՛ Union։"""
+    try:
+        led = json.load(open(LED, encoding="utf-8"))
+    except Exception:
+        return 0
+    shift = 4 * 3600
+    today = int((time.time() + shift) // 86400)
+    n = 0
+    for k, v in led.items():
+        if not (str(k).startswith("gortsarq-") or str(k).startswith("union-")):
+            continue
+        try:
+            if int((float(v) + shift) // 86400) == today:
+                n += 1
+        except Exception:
+            continue
+    return n
