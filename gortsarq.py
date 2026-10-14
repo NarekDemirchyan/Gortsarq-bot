@@ -695,3 +695,241 @@ def publish_one(sess, st, e, now):
             for k in list(day)[:12000]:
                 day.pop(k, None)
     return res
+# ===== UNION (Երևան + Գյումրի) =====
+UNION_FEEDS = (("Երևան", "https://unionapp.net/ru/sell/armenia/yerevan"),
+               ("Գյումրի", "https://unionapp.net/ru/sell/armenia/gyumri"))
+UNION_TAKE = 60
+UNION_AD_RE = re.compile(r"https://unionapp\.net/(?:ru/|en/)?ad/([a-z0-9]{6,})")
+UNION_IMG_RE = re.compile(r"https://media\.unionapp\.net/ads/[a-z0-9_]+\.webp")
+UNION_NICK_RE = re.compile(r"https://t\.me/([A-Za-z0-9_]{4,32})(?:\?|\"|\)|<|$)")
+UNION_SEC_RE = re.compile(r"(?:^|\n)\s*(?:#{2,4}\s*|<h[1-4][^>]*>)\s*(\d{1,2})\s+([A-Za-zА-Яа-я]+)")
+UNION_MON = {"january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+             "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
+             "января": 1, "февраля": 2, "марта": 3, "апреля": 4, "мая": 5, "июня": 6,
+             "июля": 7, "августа": 8, "сентября": 9, "октября": 10, "ноября": 11, "декабря": 12}
+
+def union_read(sess, url):
+    H = dict(HDRS)
+    H["Referer"] = "https://unionapp.net/"
+    for attempt in (0, 1):
+        try:
+            r = sess.get(url, headers=H, timeout=25)
+            if r.status_code == 200 and len(r.text) > 1500 and not any(b in r.text.lower() for b in BLOCKED):
+                return r.text
+        except Exception as ex:
+            print("union ուղիղ:", ex)
+        try:
+            H2 = dict(H)
+            H2["x-engine"] = "browser"
+            if JINA_KEY:
+                H2["Authorization"] = "Bearer " + JINA_KEY
+            r = sess.get("https://r.jina.ai/" + url, headers=H2, timeout=45)
+            if r.status_code == 200 and len(r.text) > 800:
+                print("union jina")
+                return r.text
+        except Exception as ex:
+            print("union jina:", ex)
+        for p in PROXIES:
+            try:
+                r = via_proxy(sess, p, url, H, 45)
+                if r.status_code == 200 and len(r.text) > 1500:
+                    return r.text
+            except Exception:
+                pass
+        time.sleep(2)
+    print("union՝ չկարդացվեց:", url)
+    return ""
+
+def union_sections(md):
+    out = []
+    now = time.gmtime(time.time() + 4 * 3600)
+    for m in UNION_SEC_RE.finditer(md):
+        try:
+            day = int(m.group(1))
+        except Exception:
+            continue
+        mon = UNION_MON.get(m.group(2).lower())
+        if not mon or day > 31:
+            continue
+        year = now.tm_year - (1 if mon > now.tm_mon else 0)
+        out.append(("%02d.%02d.%d" % (day, mon, year), m.end()))
+    return out
+
+def union_photo(sess, u):
+    H = dict(HDRS)
+    H["Referer"] = "https://unionapp.net/"
+    H["Accept"] = "image/avif,image/webp,image/jpeg,image/*,*/*;q=0.8"
+    for cand in (u.replace("_thumbnail", ""), u):
+        try:
+            r = sess.get(cand, headers=H, timeout=25)
+            if img_ok(r):
+                return r.content
+        except Exception as ex:
+            print("union նկար:", ex)
+        for p in PROXIES:
+            try:
+                r = via_proxy(sess, p, cand, H, 45)
+                if img_ok(r):
+                    return r.content
+            except Exception:
+                pass
+    print("union՝ նկարը չիջավ:", u)
+    return None
+
+def union_card(sess, aid, date, city):
+    md = union_read(sess, "https://unionapp.net/ru/ad/" + aid) or union_read(sess, "https://unionapp.net/ad/" + aid)
+    if not md:
+        return None
+    m = UNION_NICK_RE.search(md)
+    nick = m.group(1) if m else ""
+    if not nick:
+        print("union %s՝ նիկ չկա" % aid)
+        return None
+    title = ""
+    for m in re.finditer(r"^\s*#\s+(.+)$", md, re.M):
+        title = scrub(m.group(1))
+    if not title:
+        m = re.search(r"<title[^>]*>(.+?)</title>", md, re.S)
+        if m:
+            title = scrub(re.sub(r"<[^>]+>", " ", m.group(1)))
+    desc = ""
+    m = re.search(r"(?:Описание|Description)\s*\n+(.+?)(?:\n\s*(?:Report this ad|Пожаловаться|#\s))", md, re.S)
+    if m:
+        desc = scrub(" ".join(m.group(1).split()))
+    price = ""
+    m = PRICE_RE.search(md)
+    if m:
+        price = " ".join(m.group(1).split()) + " " + m.group(2)
+    photos, seen = [], set()
+    for m in UNION_IMG_RE.finditer(md):
+        u = m.group(0).replace("_thumbnail", "")
+        if u not in seen:
+            seen.add(u)
+            photos.append(u)
+    if not photos:
+        print("union %s՝ լուսանկար չկա" % aid)
+        return None
+    if not title:
+        title = HEAD_FALLBACK
+    return {"src": "union", "id": aid, "path": "union:" + aid, "date": date or today_str(),
+            "nick": nick, "title": title, "desc": desc, "price": price,
+            "place": "", "city": city, "photo": photos[0], "photos": photos[:10]}
+
+def union_send(sess, e, cap):
+    blobs = [b for b in (union_photo(sess, u) for u in (e.get("photos") or [])[:10]) if b]
+    if not blobs:
+        return False
+    if len(blobs) >= 2:
+        files = {("p%d" % i): ("p%d.jpg" % i, b) for i, b in enumerate(blobs)}
+        media = [{"type": "photo", "media": "attach://p0", "caption": cap}]
+        for i in range(1, len(blobs)):
+            media.append({"type": "photo", "media": "attach://p%d" % i})
+        if tg_post(sess, "sendMediaGroup",
+                   {"chat_id": CHAT_ID, "media": json.dumps(media, ensure_ascii=False)},
+                   files=files, timeout=150) is not None:
+            return True
+    return tg_post(sess, "sendPhoto", {"chat_id": CHAT_ID, "caption": cap},
+                   files={"photo": ("p.jpg", blobs[0])}, timeout=120) is not None
+
+def union_caption(e):
+    parts = [e.get("title") or HEAD_FALLBACK]
+    if e.get("desc") and e.get("desc") != e.get("title"):
+        parts.append(e["desc"][:700])
+    if e.get("price"):
+        parts.append(e["price"])
+    parts.append("@" + (e.get("nick") or ""))
+    return "\n\n".join(" ".join(p.split()) for p in parts if p)[:1024]
+
+def union_publish_one(sess, st, e, now):
+    path = e.get("path") or ("union:" + str(e.get("id")))
+    if not e.get("nick") or not union_send(sess, e, union_caption(e)):
+        if not e.get("nick"):
+            st["skipped"][path] = e.get("date") or today_str()
+            return "drop"
+        return "fail"
+    st["last_publish"] = now
+    st["published"][path] = e.get("date") or today_str()
+    st["failed"].pop(path, None)
+    st.setdefault("failed_date", {}).pop(path, None)
+    try:
+        led_add("union", str(e.get("id")), now)
+    except Exception:
+        pass
+    print("опубликовано union: %s @%s" % (e.get("id"), e.get("nick")))
+    return "ok"
+
+def union_harvest():
+    st = load()
+    for k, v in (("queue", []), ("published", {}), ("skipped", {}), ("failed", {}), ("failed_date", {})):
+        st.setdefault(k, v)
+    sess = requests.Session()
+    in_q = set(e.get("path") for e in st["queue"] if isinstance(e, dict))
+    ok_dates = last_days(FRESH_DAYS)
+    added = 0
+    for city, url in UNION_FEEDS:
+        md = union_read(sess, url)
+        if not md:
+            print("[union][%s] լենտան չբացվեց" % city)
+            continue
+        secs = union_sections(md)
+        found, seen = [], set()
+        for m in UNION_AD_RE.finditer(md):
+            aid = m.group(1)
+            if aid in seen:
+                continue
+            seen.add(aid)
+            date = ""
+            for d, pos in secs:
+                if pos <= m.start():
+                    date = d
+                else:
+                    break
+            found.append((date or today_str(), aid))
+        print("[union][%s] լենտայում %d, ամսաթվեր %d" % (city, len(found), len(secs)))
+        for date, aid in found:
+            if added >= UNION_TAKE:
+                break
+            path = "union:" + aid
+            if date not in ok_dates or path in in_q:
+                continue
+            if st["published"].get(path) == date or st["skipped"].get(path) == date:
+                continue
+            if is_stuck(st, path, date):
+                continue
+            e = union_card(sess, aid, date, city)
+            if not e:
+                st["skipped"][path] = date
+                continue
+            st["queue"].append(e)
+            in_q.add(path)
+            added += 1
+            print("[union] %s @%s | %s" % (aid, e["nick"], e["title"][:60]))
+            time.sleep(1)
+    while len(st["queue"]) > QUEUE_MAX:
+        st["queue"].pop(0)
+    save(st)
+    print("union՝ հերթ մտավ %d | հերթում %d" % (added, len(st["queue"])))
+
+OLD_PUBLISH = _orig_publish_one
+
+def _orig_publish_one(sess, st, e, now):
+    if isinstance(e, dict) and e.get("src") == "union":
+        return union_publish_one(sess, st, e, now)
+    return OLD_PUBLISH(sess, st, e, now)
+
+OLD_NORM_QUEUE = norm_queue
+
+def norm_queue(st):
+    uni = [e for e in st.get("queue", []) if isinstance(e, dict) and e.get("src") == "union"]
+    OLD_NORM_QUEUE(st)
+    st["queue"] = list(st.get("queue", [])) + uni
+
+OLD_MAIN = main
+
+def main():
+    res = OLD_MAIN()
+    try:
+        union_harvest()
+    except Exception as ex:
+        print("union:", ex)
+    return res
