@@ -1,20 +1,25 @@
 # -*- coding: utf-8 -*-
 """
-arenda.py — Անշարժ գույք (gortsarq.am → Telegram).
+arenda.py — Անշարժ գույք (gortsarq.am + wse.am → Telegram).
 Վարձույթ + Վաճառք նույն խմբում, մեկ հերթով։
 
 Մեկ գործարկում.
  1. Հերթից մեկ գրառում։ Հրապարակում ենք 45 րոպեն մեկ։
- 2. Հավաքում՝ վերջին 30 օրվա հայտարարությունները։
-    Առաջին լցնելը վերցնում է ամբողջ բաժինը, որ խումբը դատարկ չմնա։
- 3. Հայտարարությունը թարմացա՞վ կայքում — քարտի ամսաթիվը փոխվում է,
+ 2. Հավաքում՝ gortsarq.am-ի ամբողջ բաժինը (թարմության պատուհանը՝ 3650 օր),
+    որ հերթը երբեք դատարկ չմնա։
+ 3. wse.am-ը որպես երկրորդ աղբյուր. միայն վարձով բնակարանները Երևանում։
+    Այս աղբյուրի գրառումները հրապարակվում են մեկ անգամ։
+ 4. Հայտարարությունը թարմացա՞վ կայքում — քարտի ամսաթիվը փոխվում է,
     ու այն նորից է հերթ մտնում, նորից է հրապարակվում։
+
+Չհրապարակվող հայտարարությունը (առանց նկարի կամ առանց վերնագրի) միանգամից դեն է
+նետվում ու հիշվում, որ նորից հերթ չմտնի. բոտը շարունակում է հաջորդով ու չի կանգնում։
 
 Քարտի դաշտերը գալիս են էջի բնութագրերից։ Հեռախոսը գործարքի էջում փակ է,
 դրա համար միշտ կցվում է «Связываться» կոճակը։
 
 Նկարները ներբեռնում ենք ինքներս ու ուղարկում ֆայլով. ուղիղ հղումով Telegram-ը
-դրանք չի քաշում։ Նկար չստացվեց՝ գրառումը չի հրապարակվում ու վերադառնում է հերթ։
+դրանք չի քաշում։ Նկար չստացվեց՝ գրառումը չի հրապարակվում ու դեն է նետվում։
 """
 import os
 import re
@@ -41,14 +46,23 @@ STATE = "state-arenda.json"
 
 INTERVAL = 45 * 60        # մեկ գրառում 45 րոպեն մեկ
 QUEUE_MAX = 2000
-FRESH_DAYS = 30           # սովորական ցիկլում՝ վերջին 30 օրը
+FRESH_DAYS = 3650         # ամբողջ բաժինը, որ հերթը դատարկ չմնա
 MAX_PAGES = 20
 PER_CAT = 2000
 MAX_SECONDS = 15 * 60
+WSE_SECONDS = 240         # որքան ժամանակ ենք տալիս wse.am-ին
 RESET_ONCE = True         # հին (list.am-ի) հերթը մեկ անգամ մաքրվում է
 TEST = False
 
 BASE = "https://gortsarq.am"
+
+# ---------- wse.am՝ երկրորդ աղբյուր ----------
+
+WSE_LIST = "https://wse.am/snyat/kvartiru/erevan"
+WSE_PAGES = 3             # քանի էջ ենք վերցնում ցանկից
+WSE_TAG = "wse"           # այս աղբյուրի գրառումը մեկ անգամ է հրապարակվում
+WSE_ITEM_RE = re.compile(r"https://wse\.am/snyat/[^)\]\s\"'<>]+-\d+")
+WSE_PHOTO_RE = re.compile(r"https://wse\.am/uploads/[^)\]\s\"'<>]+\.(?:webp|jpe?g|png)", re.I)
 
 # բաժին → տեսակ (rent / sale)
 CATS = [("485c-dolgosrochnaya-arenda", "rent"),
@@ -167,6 +181,15 @@ def thumb_urls(u):
     out.append(u)
     return out
 
+def wse_photo_urls(u):
+    """wse.am-ի նկարի տարբերակները՝ սկզբում ամբողջականը, վերջում մանրը։"""
+    out = []
+    if "/uploads/thumbs/" in u:
+        out.append(u.replace("/uploads/thumbs/", "/uploads/full/"))
+        out.append(u.replace("/uploads/thumbs/", "/uploads/"))
+    out.append(u)
+    return out
+
 def relay_urls(u):
     """Շրջանցիկ հասցե. նկարը վերցնում է ուրիշ սերվեր ու տալիս մեզ։"""
     bare = u.split("://", 1)[-1]
@@ -214,9 +237,9 @@ def bytes_from(sess, url, ref):
             print(f" նկար փոխանցիչ սխալ {type(e).__name__}")
     return None
 
-def photo_bytes(sess, url, ref):
+def photo_bytes(sess, url, ref, variants=None):
     """Նկարը ներբեռնում ենք ինքներս։ Ուղիղ հղումով Telegram-ը դա չի անում։"""
-    for u in thumb_urls(url):
+    for u in (variants or thumb_urls)(url):
         b = bytes_from(sess, u, ref)
         if b:
             return b
@@ -433,7 +456,146 @@ def make_caption(sess, d):
         cap += "\n\n" + esc(d["desc"][:600])
     return cap[:1024]
 
+# ---------- wse.am ----------
+
+def wse_card(md, start):
+    """wse.am-ի քարտի տվյալները հղումից առաջ ընկած հատվածից։
+    Գինը քարտում միշտ հասցեից առաջ է, դրա համար հասցեն փնտրում ենք գնից հետո։"""
+    pre = md[max(0, start - 900):start]
+
+    photo = ""
+    ph = WSE_PHOTO_RE.findall(pre)
+    if ph:
+        photo = ph[-1]
+
+    price = ""
+    tail = pre
+    m = None
+    for m in re.finditer(r"([\d][\d\s]*)\s*֏", pre):
+        pass
+    if m:
+        price = " ".join(m.group(1).split()) + " ֏"
+        tail = pre[m.end():]
+
+    rooms = ""
+    m = re.search(r"(\d+)\s*\*{0,2}\s*комн", pre)
+    if m:
+        rooms = m.group(1)
+
+    area = ""
+    m = re.search(r"\*{1,2}(\d{2,4}(?:[.,]\d+)?)\*{1,2}\s*м²", pre)
+    if m:
+        area = m.group(1).replace(",", ".") + " м²"
+
+    floor = ""
+    m = re.search(r"\*{1,2}(\d{1,3})/(\d{1,3})\*{1,2}", pre)
+    if m:
+        floor = m.group(1) + "/" + m.group(2)
+
+    place = ""
+    for m in re.finditer(r"\*{1,2}([^*\n]{4,90})\*{1,2}", tail):
+        t = m.group(1).strip()
+        if ("," in t and "комн" not in t and "м²" not in t
+                and re.search(r"[^\W\d_]", t, re.U)):
+            place = t
+    place = fix_place(scrub(place))
+
+    parents = [p.strip() for p in place.split(",") if p.strip()]
+    district = parents[1] if len(parents) >= 2 else ""
+
+    return {"photo": photo, "price": price, "rooms": rooms, "area": area,
+            "floor": floor, "place": place, "district": district}
+
+def wse_collect(sess, deadline):
+    """wse.am-ի վարձով բնակարանները Երևանում՝ ցանկի քարտերից։"""
+    found = {}
+    for page in range(1, WSE_PAGES + 1):
+        if time.time() > deadline:
+            print(" wse. ժամանակը վերջացավ")
+            break
+        url = WSE_LIST if page == 1 else WSE_LIST + f"?page={page}"
+        md = fetch(sess, url)
+        if not md:
+            break
+        n = 0
+        for m in WSE_ITEM_RE.finditer(md):
+            link = m.group(0)
+            iid = "wse-" + link.rsplit("-", 1)[-1]
+            if iid in found:
+                continue
+            c = wse_card(md, m.start())
+            if not c["photo"]:
+                continue
+            c.update({"id": iid, "src": "wse", "date": WSE_TAG, "kind": "rent",
+                      "path": link, "url": link})
+            found[iid] = c
+            n += 1
+        print(f"[wse] էջ {page}: նոր {n}")
+        if n == 0:
+            break
+        time.sleep(1)
+    return found
+
+def wse_head(d):
+    head = "Квартира"
+    if d.get("rooms"):
+        head = d["rooms"] + "-комнатная квартира"
+    if d.get("district"):
+        head += ", " + d["district"]
+    return head
+
+def wse_caption(d):
+    lines = ["<b>" + esc(wse_head(d)) + "</b>", "🔷 В аренду"]
+    if d.get("place"):
+        lines.append("📍 Район: " + esc(d["place"]))
+    if d.get("rooms"):
+        lines.append("🏢 Комнат: " + d["rooms"])
+    if d.get("area"):
+        lines.append("📐 Площадь: " + esc(d["area"]))
+    if d.get("floor"):
+        lines.append("🏙 Этаж: " + esc(d["floor"]))
+    if d.get("price"):
+        lines.append("💰 Цена: " + esc(d["price"]) + " / месяц")
+    return "\n".join(lines)[:1024]
+
+def wse_publish(sess, st, e, now):
+    url = e.get("url") or e.get("path")
+    if st["published"].get(url) == e.get("date", WSE_TAG):
+        return "skip"
+    blob = photo_bytes(sess, e["photo"], url, wse_photo_urls)
+    if not blob:
+        print(" wse. նկարը չներբեռնվեց՝", url)
+        st["skipped"][url] = e.get("date", WSE_TAG)
+        return "drop"
+    cap = wse_caption(e)
+    markup = {"inline_keyboard": [[{"text": "Смотреть объявление", "url": url}]]}
+    if send_photo_bytes(sess, blob, cap, markup):
+        st["last_publish"] = now
+        st["published"][url] = e.get("date", WSE_TAG)
+        led_add(SITE, e.get("id", ""), now)
+        print("հրապարակվեց (wse):", url)
+        return "ok"
+    return "fail"
+
 # ---------- Telegram ----------
+
+def send_photo_bytes(sess, blob, caption, markup):
+    """Մեկ նկար ուղարկում ենք ֆայլով։ Չանցավ՝ նույնը ֆայլի տեսքով, որ գրառումը չկորչի։"""
+    r = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendPhoto",
+                  data={"chat_id": CHAT_ID, "caption": caption,
+                        "parse_mode": "HTML",
+                        "reply_markup": json.dumps(markup)},
+                  files={"photo": ("p.jpg", blob)}, timeout=90)
+    print(" ուղարկում:", r.status_code, r.text[:200])
+    if r.ok:
+        return True
+    r = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendDocument",
+                  data={"chat_id": CHAT_ID, "caption": caption,
+                        "parse_mode": "HTML",
+                        "reply_markup": json.dumps(markup)},
+                  files={"document": ("p.jpg", blob)}, timeout=120)
+    print(" ֆայլով:", r.status_code, r.text[:200])
+    return bool(r.ok)
 
 def send(sess, d, caption):
     """Նկարները ներբեռնում ենք ինքներս ու ուղարկում ֆայլով. ուղիղ հղումով Telegram-ը
@@ -447,7 +609,7 @@ def send(sess, d, caption):
             blobs.append(b)
 
     if not blobs:
-        print(" նկարները չներբեռնվեցին, հրապարակումը հետաձգվում է")
+        print(" նկարները չներբեռնվեցին, հրապարակում չկա")
         return False
 
     if len(blobs) >= 2:
@@ -479,13 +641,7 @@ def send(sess, d, caption):
             return bool(r2.ok)
         print(" ալբոմը չանցավ, փորձում ենք մեկ նկարով")
 
-    r = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendPhoto",
-                  data={"chat_id": CHAT_ID, "caption": caption,
-                        "parse_mode": "HTML",
-                        "reply_markup": json.dumps(markup)},
-                  files={"photo": ("p.jpg", blobs[0])}, timeout=90)
-    print(" ուղարկում:", r.status_code, r.text[:200])
-    return bool(r.ok)
+    return send_photo_bytes(sess, blobs[0], caption, markup)
 
 # ---------- վիճակ ----------
 
@@ -495,7 +651,8 @@ def load():
             return json.load(open(STATE, encoding="utf-8"))
         except Exception as e:
             print("state-arenda.json չի կարդացվում:", e)
-    return {"queue": [], "last_publish": 0, "published": {}, "failed": {}}
+    return {"queue": [], "last_publish": 0, "published": {}, "failed": {},
+            "skipped": {}}
 
 def save(st):
     json.dump(st, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
@@ -504,13 +661,20 @@ def norm_queue(st):
     q = []
     for e in st.get("queue", []):
         if isinstance(e, dict) and e.get("path"):
-            q.append({"id": str(e.get("id", "")), "path": e["path"],
-                      "date": e.get("date", ""), "kind": e.get("kind", "rent")})
+            d = dict(e)
+            d["id"] = str(d.get("id", ""))
+            d["date"] = d.get("date", "")
+            d["kind"] = d.get("kind", "rent")
+            d["src"] = d.get("src", "gortsarq")
+            q.append(d)
     st["queue"] = q
 
 # ---------- հրապարակում ----------
 
 def publish_one(sess, st, e, now):
+    if e.get("src") == "wse" or str(e.get("path", "")).startswith("http"):
+        return wse_publish(sess, st, e, now)
+
     path = e["path"]
     if st["published"].get(path) == e.get("date"):
         return "skip"
@@ -521,13 +685,16 @@ def publish_one(sess, st, e, now):
         print("վերլուծության սխալ:", ex)
     if not d:
         print(" էջը չբացվեց՝", path)
+        st["skipped"][path] = e.get("date") or today_str()
         return "drop"
     if not d["photos"]:
         print(" առանց նկարի՝", path)
+        st["skipped"][path] = e.get("date") or today_str()
         return "drop"
     cap = make_caption(sess, d)
     if not cap:
         print(" առանց վերնագրի՝", path)
+        st["skipped"][path] = e.get("date") or today_str()
         return "drop"
     if send(sess, d, cap):
         st["last_publish"] = now
@@ -539,7 +706,7 @@ def publish_one(sess, st, e, now):
 
 def publish_phase(sess, st, now, limit=1):
     done, tried = 0, 0
-    while st["queue"] and done < limit and tried < 3:
+    while st["queue"] and done < limit and tried < 5:
         if now - st["last_publish"] < INTERVAL:
             print("հերթական գրառման ժամանակը դեռ չեկավ")
             break
@@ -599,9 +766,10 @@ def main():
     st = load()
     st.setdefault("failed", {})
     st.setdefault("published", {})
+    st.setdefault("skipped", {})
     st.setdefault("last_publish", 0)
     norm_queue(st)
-    sess = requests.Session()
+sess = requests.Session()
     now = time.time()
     deadline = now + MAX_SECONDS
 
@@ -627,7 +795,8 @@ def main():
     if seed:
         print("առաջին լցնել. վերցնում ենք ամբողջ բաժինը")
 
-    items = get_items(sess, deadline, seed)
+    # ամբողջ բաժինը (3650 օր), բայց ժամանակի մի մասը թողնում ենք wse.am-ին
+    items = get_items(sess, deadline - WSE_SECONDS, seed)
     print("ընդհանուր գտնված:", len(items))
 
     qpaths = {e["path"] for e in st["queue"]}
@@ -637,6 +806,8 @@ def main():
             it["date"] = today_str()
         if st["published"].get(it["path"]) == it["date"]:
             continue
+        if st["skipped"].get(it["path"]) == it["date"]:
+            continue
         if it["path"] in qpaths:
             continue
         fresh.append(it)
@@ -645,6 +816,20 @@ def main():
         st["queue"].extend(fresh)
         print("հերթ մտավ:", len(fresh))
     st["seeded"] = True
+
+    # wse.am՝ երկրորդ աղբյուր. միայն վարձով բնակարանները Երևանում
+    try:
+        w = wse_collect(sess, min(deadline, time.time() + WSE_SECONDS))
+        qpaths = {e["path"] for e in st["queue"]}
+        new_w = [x for x in w.values()
+                 if x["path"] not in qpaths
+                 and st["published"].get(x["path"]) != WSE_TAG
+                 and st["skipped"].get(x["path"]) != WSE_TAG]
+        if new_w:
+            st["queue"].extend(new_w)
+        print("wse. նոր", len(new_w), "| հերթում", len(st["queue"]))
+    except Exception as ex:
+        print("wse. սխալ:", ex)
 
     while len(st["queue"]) > QUEUE_MAX:
         st["queue"].pop(0)
@@ -659,6 +844,10 @@ def main():
     if len(st["published"]) > 50000:
         keys = list(st["published"])[-20000:]
         st["published"] = {k: st["published"][k] for k in keys}
+
+    if len(st["skipped"]) > 20000:
+        keys = list(st["skipped"])[-8000:]
+        st["skipped"] = {k: st["skipped"][k] for k in keys}
 
     save(st)
     today = today_str()
