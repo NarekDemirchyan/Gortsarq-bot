@@ -1180,5 +1180,28 @@ def union_publish_one(sess, st, e, now):
         except Exception:
             pass
     return _OLD_UNION_PUB2(sess, st, e, now)
+# ---- ուղղում. Union-ի գրառումը չի կրկնվում ու չի գնում gortsarq-ի ուղիով ----
+_OLD_NORM_QUEUE2 = norm_queue
+
+def norm_queue(st):
+    uni = [e for e in st.get("queue", []) if isinstance(e, dict)
+           and (e.get("src") == "union" or str(e.get("path") or "").startswith("union:"))]
+    st["queue"] = [e for e in st.get("queue", []) if e not in uni]
+    _OLD_NORM_QUEUE2(st)
+    best = {}
+    for e in list(st.get("queue", [])) + uni:
+        p = str(e.get("path") or "")
+        cur = best.get(p)
+        if cur is None or (e.get("src") == "union" and (cur or {}).get("src") != "union"):
+            best[p] = e
+    st["queue"] = list(best.values())
+
+_OLD_ORIG2 = _orig_publish_one
+
+def _orig_publish_one(sess, st, e, now):
+    if isinstance(e, dict) and (e.get("src") == "union"
+                                or str(e.get("path") or "").startswith("union:")):
+        return union_publish_one(sess, st, e, now)
+    return _OLD_ORIG2(sess, st, e, now)
 if __name__ == "__main__":
     main()
