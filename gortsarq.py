@@ -1305,9 +1305,10 @@ def union_publish_one(sess, st, e, now):
 # ---- ուղղում. Union-ի լենտան՝ ռուսերեն տարբերակով, ոչ անգլերեն ----
 # ---- ուղղում. Union-ի տեքստը՝ ռուսերեն ----
 def _union_ru(sess, t):
-    t = str(t or "").strip()
-        if not t or re.search(r"[А-Яа-яЁё]", t):
+        t = str(t or "").strip()
+    if not t or re.search(r"[А-Яа-яЁё]", t):
         return t
+return t
     try:
         return (translate(sess, t[:1500]) or t).strip()
     except Exception:
