@@ -42,6 +42,7 @@ FRESH_DAYS  = 7              # берём объявления за послед
 PER_CAT     = 2000           # потолок ссылок на раздел
 MAX_PAGES   = 20             # предохранитель по страницам раздела
 MAX_SECONDS = 15 * 60        # сколько секунд отдаём сбору, остальное — запас
+MAX_TRIES   = 15             # сколько объявлений пробуем за один запуск
 RESET_ONCE  = False          # однократный сброс очереди (уже сделан)
 TEST        = False
 
@@ -364,7 +365,7 @@ def load():
             return json.load(open(STATE, encoding="utf-8"))
         except Exception as e:
             print("state-gortsarq.json не читается:", e)
-    return {"queue": [], "last_publish": 0, "published": {}, "failed": {}}
+    return {"queue": [], "last_publish": 0, "published": {}, "failed": {}, "skipped": {}}
 
 def save(st):
     json.dump(st, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
@@ -412,10 +413,12 @@ def publish_one(sess, st, e, now):
         return "drop"
     if not d["photos"]:
         print("  без фото, пропускаем:", iid)
+        st["skipped"][path] = e.get("date") or today_str()
         return "drop"
     cap = make_caption(sess, d)
     if not cap:
         print("  без заголовка (латиницей армянский или пусто), пропускаем:", iid)
+        st["skipped"][path] = e.get("date") or today_str()
         return "drop"
     if send(sess, d, cap):
         st["last_publish"] = now
@@ -426,9 +429,9 @@ def publish_one(sess, st, e, now):
     return "fail"
 
 def publish_phase(sess, st, now, limit=1):
-    """Публикуем из очереди: не больше limit постов, не больше трёх попыток."""
+    """Публикуем из очереди: не больше limit постов, не больше MAX_TRIES попыток."""
     done, tried = 0, 0
-    while st["queue"] and done < limit and tried < 3:
+    while st["queue"] and done < limit and tried < MAX_TRIES:
         if now - st["last_publish"] < INTERVAL:
             print("ждём интервал между публикациями")
             break
@@ -451,6 +454,7 @@ def main():
     st = load()
     st.setdefault("failed", {})
     st.setdefault("published", {})
+    st.setdefault("skipped", {})
     st.setdefault("last_publish", 0)
     norm_queue(st)
     norm_published(st)
@@ -488,6 +492,8 @@ def main():
             continue                      # старше недели — не берём вовсе
         if st["published"].get(it["path"]) == it["date"]:
             continue                      # выходило с этой же датой обновления
+        if st["skipped"].get(it["path"]) == it["date"]:
+            continue                      # уже отброшено: без фото или без заголовка
         fresh.append({"id": iid, "path": it["path"], "date": it["date"]})
 
     if fresh:
@@ -508,6 +514,10 @@ def main():
     if len(st["published"]) > 50000:
         keys = list(st["published"])[-20000:]
         st["published"] = {k: st["published"][k] for k in keys}
+
+    if len(st["skipped"]) > 20000:
+        keys = list(st["skipped"])[-8000:]
+        st["skipped"] = {k: st["skipped"][k] for k in keys}
 
     save(st)
     today = today_str()
