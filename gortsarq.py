@@ -1221,5 +1221,61 @@ def union_publish_one(sess, st, e, now):
         else:
             e["nick"] = n
     return _OLD_UNION_PUB3(sess, st, e, now)
+# ---- ուղղում. Union՝ վերին 50-ը, նորը՝ հերթի պոչը, նիկը՝ միայն t.me հղումից ----
+UNION_TAKE = 50
+_NICK_JUNK = ("context", "type", "id", "graph", "unionapp_bot", "union", "share", "telegram")
+
+def union_harvest():
+    st = load()
+    for k, v in (("queue", []), ("published", {}), ("skipped", {}),
+                 ("failed", {}), ("failed_date", {}), ("nicks", {})):
+        st.setdefault(k, v)
+    sess = requests.Session()
+    in_q = {e.get("path") for e in st["queue"] if isinstance(e, dict)}
+    added = 0
+    for city, url in UNION_FEEDS:
+        md = union_read(sess, url)
+        if not md:
+            print("[union][%s] լենտան չբացվեց" % city)
+            continue
+        secs = union_sections(md)
+        found = union_items(md, secs)
+        print("[union][%s] լենտայում %d, ամսաթիվ %d" % (city, len(found), len(secs)))
+        for pos, (date, aid, it) in enumerate(found):
+            if pos >= UNION_TAKE:
+                break
+            path = "union:" + aid
+            if path in in_q or path in st["published"] or path in st["skipped"]:
+                continue
+            if is_stuck(st, path, date):
+                continue
+            if not it["photos"]:
+                continue
+            nick = st["nicks"].get(aid)
+            if nick is not None and str(nick).lower() in _NICK_JUNK:
+                nick = None
+            if nick is None:
+                nick = ""
+                try:
+                    pg = union_read(sess, "https://unionapp.net/en/ad/" + aid, raw=True)
+                    nick = _union_nick_from_chunk(pg or "")
+                except Exception:
+                    nick = ""
+                if str(nick).lower() in _NICK_JUNK:
+                    nick = ""
+                st["nicks"][aid] = nick
+                if len(st["nicks"]) > 3000:
+                    for k in list(st["nicks"])[:1000]:
+                        st["nicks"].pop(k, None)
+            st["queue"].append({"src": "union", "id": aid, "path": path, "date": date,
+                                "nick": nick or "", "title": it["title"] or HEAD_FALLBACK,
+                                "desc": it["desc"], "price": it["price"],
+                                "place": it["city"], "photo": it["photos"][0],
+                                "photos": it["photos"][:10]})
+            in_q.add(path)
+            added += 1
+    save(st)
+    print("union՝ ավելացվեց %d | հերթում %d" % (added, len(st["queue"])))
+    return added
 if __name__ == "__main__":
     main()
