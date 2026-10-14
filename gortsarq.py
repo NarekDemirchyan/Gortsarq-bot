@@ -678,3 +678,20 @@ def main():
 
 if __name__ == "__main__":
     main()
+# ---- ուղղում. նույն հայտարարությունը երկու անգամ չի հրապարակվում ----
+_orig_publish_one = publish_one
+
+def publish_one(sess, st, e, now):
+    path = e["path"]
+    day = st.setdefault("pub_day", {})
+    if day.get(path) == today_str():
+        return "skip"
+    if st.get("published", {}).get(path) and e.get("date") != today_str():
+        return "skip"
+    res = _orig_publish_one(sess, st, e, now)
+    if res == "ok":
+        day[path] = today_str()
+        if len(day) > 20000:
+            for k in list(day)[:12000]:
+                day.pop(k, None)
+    return res
