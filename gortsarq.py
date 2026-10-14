@@ -676,8 +676,6 @@ def main():
     print(f"готово, публикаций за запуск: {done} | сегодня всего: {n_today}")
     return done
 
-if __name__ == "__main__":
-    main()
 # ---- ուղղում. նույն հայտարարությունը երկու անգամ չի հրապարակվում ----
 _orig_publish_one = publish_one
 
@@ -1160,3 +1158,5 @@ def led_today():
         except Exception:
             continue
     return n
+if __name__ == "__main__":
+    main()
