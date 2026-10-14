@@ -1302,5 +1302,24 @@ def union_publish_one(sess, st, e, now):
         if e.get("photos"):
             e["photos"] = [_union_big(x) for x in e["photos"]]
     return _OLD_UNION_PUB4(sess, st, e, now)
+# ---- ուղղում. Union-ի լենտան՝ ռուսերեն տարբերակով, ոչ անգլերեն ----
+# ---- ուղղում. Union-ի տեքստը՝ ռուսերեն ----
+def _union_ru(sess, t):
+    t = str(t or "").strip()
+        if not t or re.search(r"[А-Яа-яЁё]", t):
+        return t
+    try:
+        return (translate(sess, t[:1500]) or t).strip()
+    except Exception:
+        return t
+
+_OLD_UNION_PUB5 = union_publish_one
+
+def union_publish_one(sess, st, e, now):
+    if isinstance(e, dict):
+        e["title"] = _union_ru(sess, e.get("title"))
+        e["desc"] = _union_ru(sess, e.get("desc"))
+    return _OLD_UNION_PUB5(sess, st, e, now)
+UNION_FEEDS = tuple((name, str(url).replace("/en/", "/ru/")) for name, url in UNION_FEEDS)
 if __name__ == "__main__":
     main()
