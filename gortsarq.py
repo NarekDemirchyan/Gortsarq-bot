@@ -1288,5 +1288,19 @@ def thumb_urls(u):
             out.append(BASE + "/images/thumbnails/" + size + "/detailed/" + tail)
     out.insert(0, u)
     return out
+# ---- ուղղում. Union-ի նկարները՝ thumbnail-ի փոխարեն մեծը ----
+def _union_big(u):
+    u = str(u or "")
+    return u.replace("_thumbnail.webp", "_preview.jpg") if "_thumbnail.webp" in u else u
+
+_OLD_UNION_PUB4 = union_publish_one
+
+def union_publish_one(sess, st, e, now):
+    if isinstance(e, dict):
+        if e.get("photo"):
+            e["photo"] = _union_big(e["photo"])
+        if e.get("photos"):
+            e["photos"] = [_union_big(x) for x in e["photos"]]
+    return _OLD_UNION_PUB4(sess, st, e, now)
 if __name__ == "__main__":
     main()
