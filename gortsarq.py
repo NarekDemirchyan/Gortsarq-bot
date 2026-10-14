@@ -1303,5 +1303,10 @@ def union_publish_one(sess, st, e, now):
             e["photos"] = [_union_big(x) for x in e["photos"]]
     return _OLD_UNION_PUB4(sess, st, e, now)
 UNION_FEEDS = tuple((name, str(url).replace("/en/", "/ru/")) for name, url in UNION_FEEDS)
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__":main()
+ if __name__ == "__main__":main()
+
+# ---- մեկ անգամ. հերթից դուրս ենք գցում հին անգլերեն գրառումները ----
+def _flush_queue():
+    ...
+
