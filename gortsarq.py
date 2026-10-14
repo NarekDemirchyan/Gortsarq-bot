@@ -1303,10 +1303,17 @@ def union_publish_one(sess, st, e, now):
             e["photos"] = [_union_big(x) for x in e["photos"]]
     return _OLD_UNION_PUB4(sess, st, e, now)
 UNION_FEEDS = tuple((name, str(url).replace("/en/", "/ru/")) for name, url in UNION_FEEDS)
-if __name__ == "__main__":main()
- if __name__ == "__main__":main()
+if __name__ == "__main__": main()
 
-# ---- մեկ անգամ. հերթից դուրս ենք գցում հին անգլերեն գրառումները ----
-def _flush_queue():
-    ...
+try:
+    st = load()
+    st.get("flush_ru1") or st.update({"queue": [], "failed": {}, "flush_ru1": True}) or save(st)
+except Exception:
+    pass
 
+_O = union_publish_one
+
+def union_publish_one(sess, st, e, now):
+    if isinstance(e, dict):
+        e["title"] = re.sub(r"\s*\d[\d\s.,]*\s*[\u058f\u20bd]\s*[\]\[\)\(]*\s*$", "", str(e.get("title") or "")).strip(" -|([")
+    return _O(sess, st, e, now)
