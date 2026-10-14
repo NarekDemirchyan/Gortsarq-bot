@@ -152,6 +152,9 @@ def fetch(sess, url):
     try:
         h = dict(HDRS)
         h["x-engine"] = "browser"
+        key = os.environ.get("JINA_KEY", "")
+        if key:
+            h["Authorization"] = "Bearer " + key
         r = sess.get("https://r.jina.ai/" + url, headers=h, timeout=40)
         if r.status_code == 200 and good(r.text):
             print(" jina")
@@ -758,7 +761,7 @@ def get_items(sess, deadline, seed):
             if not seed and fresh == 0 and page > 1:
                 break
             time.sleep(1)
-    return found
+return found
 
 # ---------- գլխավոր ----------
 
