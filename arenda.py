@@ -769,11 +769,10 @@ def main():
     st.setdefault("skipped", {})
     st.setdefault("last_publish", 0)
     norm_queue(st)
-sess = requests.Session()
+    sess = requests.Session()
     now = time.time()
     deadline = now + MAX_SECONDS
-
-    if RESET_ONCE and st.get("reset_nedv") != 2:
+if RESET_ONCE and st.get("reset_nedv") != 2:
         st["queue"] = []
         st["failed"] = {}
         st["published"] = {}
