@@ -23,8 +23,6 @@ gortsarq.am -> Telegram («Барахолка Երևան»).
 Закрытые телефоны вида «(0x xxx xxxx)» вырезаем. Заголовок и описание переводим
 на русский, не вышло — публикуем оригинал. Инфинитив вроде «Одеваться» заголовком
 не ставим. Армянское слово латиницей не публикуем. Без фото объявление пропускаем.
-Неудачное объявление (нет фото, страница не открылась) откладываем на DROPPED_HOLD
-и сразу идём к следующему, чтобы группа не молчала.
 Очередь перед публикацией перемешивается, чтобы разделы шли вперемешку.
 
 Знаки «<» и «>» в разборе страниц набраны кодом символа.
@@ -60,9 +58,6 @@ MAX_PAGES   = 20             # предохранитель по страниц�
 MAX_SECONDS = 15 * 60        # сколько секунд отдаём сбору, остальное — запас
 RESET_ONCE  = False          # однократный сброс очереди (уже сделан)
 TEST        = False
-
-DROPPED_HOLD = 6 * 3600      # сколько держим неудачное объявление в стороне
-TRIES        = 8             # сколько объявлений пробуем за один запуск
 
 BASE = "https://gortsarq.am"
 
@@ -332,7 +327,7 @@ def load():
             return json.load(open(STATE, encoding="utf-8"))
         except Exception as e:
             print("state-gortsarq.json не читается:", e)
-    return {"queue": [], "last_publish": 0, "published": {}, "failed": {}, "dropped": {}}
+    return {"queue": [], "last_publish": 0, "published": {}, "failed": {}}
 
 def save(st):
     json.dump(st, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
@@ -376,14 +371,14 @@ def publish_one(sess, st, e, now):
     except Exception as ex:
         print("ошибка разбора:", ex)
     if not d:
-        print("  страница не открылась, откладываем:", iid)
+        print("  страница не открылась, пропускаем:", iid)
         return "drop"
     if not d["photos"]:
-        print("  без фото, откладываем:", iid)
+        print("  без фото, пропускаем:", iid)
         return "drop"
     cap = make_caption(sess, d)
     if not cap:
-        print("  без заголовка (латиницей армянский или пусто), откладываем:", iid)
+        print("  без заголовка (латиницей армянский или пусто), пропускаем:", iid)
         return "drop"
     if send(sess, d, cap):
         st["last_publish"] = now
@@ -393,10 +388,10 @@ def publish_one(sess, st, e, now):
         return "ok"
     return "fail"
 
-def publish_phase(sess, st, now, limit=1, tries=TRIES):
-    """Публикуем из очереди: не больше limit постов, до tries попыток за запуск."""
+def publish_phase(sess, st, now, limit=1):
+    """Публикуем из очереди: не больше limit постов, не больше трёх попыток."""
     done, tried = 0, 0
-    while st["queue"] and done < limit and tried < tries:
+    while st["queue"] and done < limit and tried < 3:
         if now - st["last_publish"] < INTERVAL:
             print("ждём интервал между публикациями")
             break
@@ -413,9 +408,6 @@ def publish_phase(sess, st, now, limit=1, tries=TRIES):
                 print(f"  вернём в конец очереди: {path}")
             else:
                 print(f"  брошен {path}: не удалось 2 раза")
-        elif res == "drop":
-            st["dropped"][e["path"]] = now
-            print(f"  отложен на {DROPPED_HOLD // 3600} ч: {e['path']}")
     return done
 
 def main():
@@ -423,7 +415,6 @@ def main():
     st.setdefault("failed", {})
     st.setdefault("published", {})
     st.setdefault("last_publish", 0)
-    st.setdefault("dropped", {})
     norm_queue(st)
     norm_published(st)
     sess = requests.Session()
@@ -460,8 +451,6 @@ def main():
             continue                      # старше недели — не берём вовсе
         if st["published"].get(it["path"]) == it["date"]:
             continue                      # выходило с этой же датой обновления
-        if now - st["dropped"].get(it["path"], 0) < DROPPED_HOLD:
-            continue                      # недавно отложили — не берём снова
         fresh.append({"id": iid, "path": it["path"], "date": it["date"]})
 
     if fresh:
