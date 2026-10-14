@@ -1158,5 +1158,27 @@ def led_today():
         except Exception:
             continue
     return n
+# ---- ուղղում. նիկը՝ միայն t.me հղումից, և միայն հրապարակվողի համար ----
+NICK_RE2 = re.compile(r"t\.me/([A-Za-z0-9_]{4,32})")
+
+def _union_nick_from_chunk(chunk):
+    for m in NICK_RE2.finditer(chunk or ""):
+        n = m.group(1)
+        if n.lower() not in NICK_STOP:
+            return n
+    return ""
+
+_OLD_UNION_PUB2 = union_publish_one
+
+def union_publish_one(sess, st, e, now):
+    if e.get("src") == "union" and not e.get("nick"):
+        try:
+            txt = union_read(sess, "https://unionapp.net/en/ad/" + str(e.get("id")), raw=True)
+            n = _union_nick_from_chunk(txt)
+            if n:
+                e["nick"] = n
+        except Exception:
+            pass
+    return _OLD_UNION_PUB2(sess, st, e, now)
 if __name__ == "__main__":
     main()
