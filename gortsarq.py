@@ -7,11 +7,11 @@ gortsarq.am -> Telegram («Բարախոլկա Երևան»).
   2. Հավաքում ենք վերջին շաբաթվա հայտարարությունները, բայց ոչ ավելի քան MAX_SECONDS։
   3. Վիճակը պահվում է ամեն աստիճանից հետո։
 
-Բաժինը թերթվում է, քանի դեռ էջում կա FRESH_DAYS օրվա թարմ հայտարարություն և քանի դեռ գալիս են նոր հղումներ։
+Բաժինը թերթվում է, քանի դեռ էջում կա FRESH_DAYS օրվա թարմ հայտարարություն։
 
 Հայտարարության էջը կարդացվում է մեկ անգամ՝ markdown-ը բավական է և՛ վերնագրի, և՛ գնի, և՛ նկարների համար։
 Նկարները բոտն ինքն է իջեցնում ու ուղարկում ֆայլով. ուղիղ հղումով Telegram-ը դրանք չի քաշում։
-Նկար չստացվեց՝ գրառումը չի հրապարակվում ու վերադառնում է հերթ։
+Նկար չեղավ կամ չիջավ՝ հայտարարությունը գնում է տեքստով, ոչ թե դեն է նետվում։
 """
 import os
 import re
@@ -103,8 +103,7 @@ def good(text):
     return not any(b in low for b in BLOCKED)
 
 def fetch(sess, url):
-    """Прямой запрос первым, дальше Jina, дальше прокси. По одной попытке.
-    Возвращаем markdown: HTML переводим через fetcher.to_md."""
+    """Прямой запрос первым, дальше Jina, дальше прокси. По одной попытке."""
     try:
         r = sess.get(url, headers=HDRS, timeout=25)
         if r.status_code == 200 and good(r.text):
@@ -323,7 +322,7 @@ def make_caption(sess, d):
 
 def send(sess, d, caption):
     """Նկարները ներբեռնում ենք ինքներս ու ուղարկում ֆայլով. ուղիղ հղումով Telegram-ը
-    դրանք չի քաշում։ Նկար չստացվեց՝ չենք հրապարակում, հայտարարությունը կվերադառնա հերթ։"""
+    դրանք չի քաշում։ Նկար չեղավ կամ չիջավ՝ ուղարկում ենք տեքստով, որ խումբը չքնի։"""
     markup = {"inline_keyboard": [[{"text": "Связаться", "url": d["url"]}]]}
 
     blobs = []
@@ -333,8 +332,12 @@ def send(sess, d, caption):
             blobs.append(b)
 
     if not blobs:
-        print("  նկարները չներբեռնվեցին, հրապարակումը հետաձգվում է")
-        return False
+        r = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+                      data={"chat_id": CHAT_ID, "text": caption,
+                            "reply_markup": json.dumps(markup)},
+                      timeout=40)
+        print("telegram текст (без фото):", r.status_code, r.text[:200])
+        return bool(r.ok)
 
     if len(blobs) >= 2:
         files = {f"p{i}": (f"p{i}.jpg", b) for i, b in enumerate(blobs)}
@@ -410,10 +413,6 @@ def publish_one(sess, st, e, now):
         print("ошибка разбора:", ex)
     if not d:
         print("  страница не открылась, пропускаем:", iid)
-        return "drop"
-    if not d["photos"]:
-        print("  без фото, пропускаем:", iid)
-        st["skipped"][path] = e.get("date") or today_str()
         return "drop"
     cap = make_caption(sess, d)
     if not cap:
@@ -493,7 +492,7 @@ def main():
         if st["published"].get(it["path"]) == it["date"]:
             continue                      # выходило с этой же датой обновления
         if st["skipped"].get(it["path"]) == it["date"]:
-            continue                      # уже отброшено: без фото или без заголовка
+            continue                      # уже отброшено: без заголовка
         fresh.append({"id": iid, "path": it["path"], "date": it["date"]})
 
     if fresh:
