@@ -9,6 +9,7 @@ gortsarq.am -> Telegram («Բարախոլկա Երևան»).
 
 Հրապարակվում է միայն նկարով հայտարարություն. նկար չկա կամ չիջավ՝ հրապարակում չկա։
 Կոճակը՝ մեկ նկարի դեպքում կցվում է գրառմանը, ալբոմի դեպքում՝ առանձին հաղորդագրությամբ։
+«Сегодня всего»-ն հաշվում է հրապարակման պահով՝ մատյանի (published.json) գրառումներից։
 """
 import os
 import re
@@ -33,6 +34,7 @@ CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 SITE        = "gortsarq"
 STATE       = "state-gortsarq.json"
+LED         = "published.json"   # մատյան՝ հրապարակման ժամանակներով
 INTERVAL    = 0              # ритм задаёт расписание (run.py)
 QUEUE_MAX   = 2000           # максимум объявлений в очереди
 FRESH_DAYS  = 7              # берём объявления за последнюю неделю
@@ -70,12 +72,14 @@ ITEM_ID_RE = re.compile(r"/(\d+)p-")
 PHOTO_RE   = re.compile(r"""https://gortsarq\.am/images/detailed/\d+/[^)\]\s"'""" + GT + r"""]+""")
 DATE_RE    = re.compile(r"\d{2}\.\d{2}\.\d{4}")
 
+# закрытый телефон: (0x xxx xxxx) и любые похожие наборы «x»
 MASK_RE    = re.compile(r"\(?\s*0?\s*x{2,}[\s\-x]*x{2,}\s*\)?", re.I)
 
 def today_str():
     return time.strftime("%d.%m.%Y", time.gmtime(time.time() + 4 * 3600))
 
 def scrub(text):
+    """Убираем закрытые телефоны и лишние пробелы."""
     return " ".join(MASK_RE.sub(" ", text or "").split())
 
 def last_days(n):
@@ -91,12 +95,14 @@ def list_url(cat, page):
 # ---------- сеть ----------
 
 def good(text):
+    """Страница пригодна: не защита и не пустышка."""
     if not text or len(text) < 1500:
         return False
     low = text.lower()
     return not any(b in low for b in BLOCKED)
 
 def fetch(sess, url):
+    """Прямой запрос первым, дальше Jina, дальше прокси. По одной попытке."""
     try:
         r = sess.get(url, headers=HDRS, timeout=25)
         if r.status_code == 200 and good(r.text):
@@ -132,6 +138,7 @@ def fetch(sess, url):
 # ---------- նկարներ ----------
 
 def thumb_urls(u):
+    """Մեկ նկարի տարբերակները՝ սկզբում մանրը, վերջում՝ ամբողջականը։"""
     out = []
     if "/images/detailed/" in u:
         tail = u.split("/images/detailed/", 1)[1]
@@ -141,16 +148,19 @@ def thumb_urls(u):
     return out
 
 def relay_urls(u):
+    """Շրջանցիկ հասցե. նկարը վերցնում է ուրիշ սերվեր ու տալիս մեզ։"""
     bare = u.split("://", 1)[-1]
     return [f"https://images.weserv.nl/?url={bare}"]
 
 def img_ok(r):
+    """Նման է նկարի՝ ոչ սխալ, ոչ դատարկ ու ոչ HTML։"""
     b = r.content or b""
     if r.status_code != 200 or len(b) < 1200:
         return False
     return not b.lstrip()[:1] == b"<"
 
 def bytes_from(sess, url, ref):
+    """Նկարի բայթերը՝ ուղիղ Referer-ով, հետո proxy-ներով, հետո փոխանցիչով։"""
     h = dict(HDRS)
     h["Referer"] = ref or BASE + "/"
     h["Accept"] = "image/avif,image/webp,image/jpeg,image/*,*/*;q=0.8"
@@ -185,6 +195,7 @@ def bytes_from(sess, url, ref):
     return None
 
 def photo_bytes(sess, url, ref):
+    """Նկարը ներբեռնում ենք ինքներս։ Ուղիղ հղումով Telegram-ը դա չի անում։"""
     for u in thumb_urls(url):
         b = bytes_from(sess, u, ref)
         if b:
@@ -195,6 +206,7 @@ def photo_bytes(sess, url, ref):
 # ---------- разбор ----------
 
 def get_items(sess, deadline):
+    """Ссылки разделов, пока идут новые и пока на странице есть свежее."""
     ok_dates = last_days(FRESH_DAYS)
     found = {}
     for cat in CATS:
@@ -226,7 +238,7 @@ def get_items(sess, deadline):
             if n == 0 or per_cat >= PER_CAT:
                 break
             if fresh == 0 and page > 1:
-                break
+                break                  # дальше только старое
             time.sleep(1)
     return found
 
@@ -281,6 +293,7 @@ def headline(sess, d):
     t = scrub(translate(sess, src).strip())
     if is_translit_hy(src) or is_translit_hy(t):
         return ""
+    # инфинитив вроде «Одеваться» заголовком не ставим
     if t and not re.search(r"(?:ться|тись)$", t.lower()) and (has_cyr(t) or script(t) == "lat"):
         return " ".join(t.split())[:90]
     alt = scrub(translate(sess, d["desc"][:300]).strip())
@@ -370,7 +383,28 @@ def load():
 def save(st):
     json.dump(st, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
 
+def led_today():
+    """Քանի գրառում է դուրս եկել այսօր՝ ըստ հրապարակման ժամանակի։
+    Թիվը վերցնում ենք մատյանից (published.json), ոչ թե հայտարարության ամսաթվից։"""
+    try:
+        led = json.load(open(LED, encoding="utf-8"))
+    except Exception:
+        return 0
+    shift = 4 * 3600                       # Երևանի ժամանակ (UTC+4)
+    today = int((time.time() + shift) // 86400)
+    n = 0
+    for k, v in led.items():
+        if not str(k).startswith(SITE + "-"):
+            continue
+        try:
+            if int((float(v) + shift) // 86400) == today:
+                n += 1
+        except Exception:
+            continue
+    return n
+
 def norm_queue(st):
+    """Очередь — словари {id, path, date}; старые строки-пути тоже принимаем."""
     q = []
     for e in st.get("queue", []):
         if isinstance(e, dict) and e.get("path"):
@@ -387,6 +421,7 @@ def norm_queue(st):
     st["queue"] = q
 
 def norm_published(st):
+    """Старые отметки времени превращаем в дату обновления (ДД.ММ.ГГГГ)."""
     pub = st.get("published") or {}
     for k, v in list(pub.items()):
         if isinstance(v, (int, float)):
@@ -400,7 +435,7 @@ def publish_one(sess, st, e, now):
     path = e["path"]
     iid = e.get("id") or ""
     if st["published"].get(path) == e.get("date"):
-        return "skip"
+        return "skip"                  # выходило с этой же датой обновления
     d = None
     try:
         d = item_data(sess, path)
@@ -427,6 +462,7 @@ def publish_one(sess, st, e, now):
     return "fail"
 
 def publish_phase(sess, st, now, limit=1):
+    """Публикуем из очереди: не больше limit постов, не больше MAX_TRIES попыток."""
     done, tried = 0, 0
     while st["queue"] and done < limit and tried < MAX_TRIES:
         if now - st["last_publish"] < INTERVAL:
@@ -465,6 +501,7 @@ def main():
         st["reset_done2"] = True
         print("очистка: очередь сброшена")
 
+    # 1. публикация из уже собранной очереди — до всякого сбора
     done = publish_phase(sess, st, now, 1)
     save(st)
 
@@ -475,6 +512,7 @@ def main():
                 print("фото:", len(d["photos"]), "заголовок:", d["title"])
         return done
 
+    # 2. сбор объявлений за неделю, пока хватает времени
     items = get_items(sess, deadline)
     print("всего найдено:", len(items))
 
@@ -482,11 +520,11 @@ def main():
     fresh = []
     for iid, it in items.items():
         if not it["date"]:
-            it["date"] = today_str()
+            it["date"] = today_str()      # без даты на карточке считаем сегодняшним
         if it["date"] not in ok_dates:
-            continue
+            continue                      # старше недели — не берём вовсе
         if st["published"].get(it["path"]) == it["date"]:
-            continue
+            continue                      # выходило с этой же датой обновления
         if st["skipped"].get(it["path"]) == it["date"]:
             continue                      # уже отброшено: без фото или без заголовка
         fresh.append({"id": iid, "path": it["path"], "date": it["date"]})
@@ -499,8 +537,10 @@ def main():
     print("свежих за неделю:", len(fresh), "| очередь:", len(st["queue"]))
     save(st)
 
+    # 3. перемешиваем, чтобы разделы шли вперемешку
     random.shuffle(st["queue"])
 
+    # 4. если очередь была пуста и только что наполнилась — публикуем
     if done == 0 and st["queue"]:
         done += publish_phase(sess, st, time.time(), 1)
 
@@ -513,8 +553,7 @@ def main():
         st["skipped"] = {k: st["skipped"][k] for k in keys}
 
     save(st)
-    today = today_str()
-    n_today = sum(1 for v in st["published"].values() if str(v) == today)
+    n_today = led_today()
     print(f"готово, публикаций за запуск: {done} | сегодня всего: {n_today}")
     return done
 
