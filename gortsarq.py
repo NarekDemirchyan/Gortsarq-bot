@@ -12,6 +12,7 @@ gortsarq.am -> Telegram («Բարախոլկա Երևան»).
 Հայտարարության էջը կարդացվում է մեկ անգամ՝ markdown-ը բավական է և՛ վերնագրի, և՛ գնի, և՛ նկարների համար։
 Նկարները բոտն ինքն է իջեցնում ու ուղարկում ֆայլով. ուղիղ հղումով Telegram-ը դրանք չի քաշում։
 Նկար չեղավ կամ չիջավ՝ հայտարարությունը գնում է տեքստով, ոչ թե դեն է նետվում։
+Ալբոմով գրառմանը կոճակը կցվում է առանձին հաղորդագրությամբ (ալբոմը reply_markup չի ընդունում)։
 """
 import os
 import re
@@ -322,7 +323,8 @@ def make_caption(sess, d):
 
 def send(sess, d, caption):
     """Նկարները ներբեռնում ենք ինքներս ու ուղարկում ֆայլով. ուղիղ հղումով Telegram-ը
-    դրանք չի քաշում։ Նկար չեղավ կամ չիջավ՝ ուղարկում ենք տեքստով, որ խումբը չքնի։"""
+    դրանք չի քաշում։ Նկար չեղավ կամ չիջավ՝ ուղարկում ենք տեքստով, որ խումբը չքնի։
+    Ալբոմից հետո կոճակը գնում է առանձին հաղորդագրությամբ։"""
     markup = {"inline_keyboard": [[{"text": "Связаться", "url": d["url"]}]]}
 
     blobs = []
@@ -350,7 +352,21 @@ def send(sess, d, caption):
                       files=files, timeout=120)
         print("telegram album:", r.status_code, r.text[:200])
         if r.ok:
-            return True
+            mid = None
+            try:
+                res = r.json().get("result") or []
+                if res:
+                    mid = res[0]["message_id"]
+            except Exception:
+                mid = None
+            payload = {"chat_id": CHAT_ID, "text": "Связаться с продавцом",
+                       "reply_markup": json.dumps(markup)}
+            if mid:
+                payload["reply_parameters"] = json.dumps({"message_id": mid})
+            r2 = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+                           data=payload, timeout=40)
+            print("telegram кнопка:", r2.status_code, r2.text[:200])
+            return bool(r2.ok)
         print("  ալբոմը չանցավ, փորձում ենք մեկ նկարով")
 
     r = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendPhoto",
