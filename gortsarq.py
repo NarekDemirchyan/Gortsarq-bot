@@ -3,13 +3,17 @@
 gortsarq.am -> Telegram («Բարախոլկա Երևան»).
 
 Պորդանոկ աշխատանքի մեկ գործարկման:
-  1. Հրապարակում ենք պատրաստի հերթից — մեկ գրառում։
-  2. Հավաքում ենք վերջին շաբաթվա հայտարարությունները, բայց ոչ ավելի քան MAX_SECONDS։
-  3. Վիճակը պահվում է ամեն աստիճանից հետո։
+ 1. Հրապարակում ենք պատրաստի հերթից — մեկ գրառում։
+ 2. Հավաքում ենք վերջին շաբաթվա հայտարարությունները, բայց ոչ ավելի քան MAX_SECONDS։
+ 3. Վիճակը պահվում է ամեն աստիճանից հետո։
 
 Հրապարակվում է միայն նկարով հայտարարություն. նկար չկա կամ չիջավ՝ հրապարակում չկա։
 Կոճակը՝ մեկ նկարի դեպքում կցվում է գրառմանը, ալբոմի դեպքում՝ առանձին հաղորդագրությամբ։
 «Сегодня всего»-ն հաշվում է հրապարակման պահով՝ մատյանի (published.json) գրառումներից։
+
+Երկու անգամ չուղարկված հայտարարությունը դեն է նետվում ու այլևս հերթ չի մտնում, որ մեկ
+չուղարկվող գրառումը չխցանի հրապարակման տեղը. եթե կայքում հայտարարությունը թարմանա
+(ամսաթիվը փոխվի), նա նորից հնարավորություն է ստանում։
 """
 import os
 import re
@@ -378,7 +382,8 @@ def load():
             return json.load(open(STATE, encoding="utf-8"))
         except Exception as e:
             print("state-gortsarq.json не читается:", e)
-    return {"queue": [], "last_publish": 0, "published": {}, "failed": {}, "skipped": {}}
+    return {"queue": [], "last_publish": 0, "published": {}, "failed": {},
+            "failed_date": {}, "skipped": {}}
 
 def save(st):
     json.dump(st, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
@@ -428,6 +433,32 @@ def norm_published(st):
             pub[k] = time.strftime("%d.%m.%Y", time.gmtime(v + 4 * 3600))
     st["published"] = pub
 
+def mark_failed(st, path, date):
+    """Считаем неудачу и запоминаем, на какой версии объявления она случилась."""
+    st["failed"][path] = st["failed"].get(path, 0) + 1
+    st.setdefault("failed_date", {})[path] = date or ""
+    return st["failed"][path]
+
+def is_stuck(st, path, date):
+    """Дважды не ушло на этой же версии — больше не пробуем."""
+    if st["failed"].get(path, 0) < 2:
+        return False
+    return st.get("failed_date", {}).get(path, "") == (date or "")
+
+def drop_stuck_queue(st):
+    """Убираем из очереди всё, что уже дважды не ушло: иначе оно съедает слот."""
+    st.setdefault("failed_date", {})
+    keep, dropped = [], 0
+    for e in st["queue"]:
+        if st["failed"].get(e["path"], 0) >= 2:
+            st["failed_date"].setdefault(e["path"], e.get("date") or "")
+            dropped += 1
+            continue
+        keep.append(e)
+    if dropped:
+        print("очередь: убрано застрявших", dropped)
+    st["queue"] = keep
+
 # ---------- публикация ----------
 
 def publish_one(sess, st, e, now):
@@ -443,6 +474,9 @@ def publish_one(sess, st, e, now):
         print("ошибка разбора:", ex)
     if not d:
         print("  страница не открылась, пропускаем:", iid)
+        n = mark_failed(st, path, e.get("date"))
+        if n >= 2:
+            print("  брошен: страница не открылась 2 раза")
         return "drop"
     if not d["photos"]:
         print("  без фото, пропускаем:", iid)
@@ -456,6 +490,8 @@ def publish_one(sess, st, e, now):
     if send(sess, d, cap):
         st["last_publish"] = now
         st["published"][path] = e.get("date") or today_str()
+        st["failed"].pop(path, None)
+        st.setdefault("failed_date", {}).pop(path, None)
         led_add(SITE, iid, now)
         print(f"опубликовано: {iid} ({path}) фото {len(d['photos'])}")
         return "ok"
@@ -475,8 +511,8 @@ def publish_phase(sess, st, now, limit=1):
             done += 1
         elif res == "fail":
             path = e["path"]
-            st["failed"][path] = st["failed"].get(path, 0) + 1
-            if st["failed"][path] < 2:
+            n = mark_failed(st, path, e.get("date"))
+            if n < 2:
                 st["queue"].append(e)
                 print(f"  вернём в конец очереди: {path}")
             else:
@@ -489,8 +525,10 @@ def main():
     st.setdefault("published", {})
     st.setdefault("skipped", {})
     st.setdefault("last_publish", 0)
+    st.setdefault("failed_date", {})
     norm_queue(st)
     norm_published(st)
+    drop_stuck_queue(st)
     sess = requests.Session()
     now = time.time()
     deadline = now + MAX_SECONDS
@@ -517,16 +555,24 @@ def main():
     print("всего найдено:", len(items))
 
     ok_dates = last_days(FRESH_DAYS)
+    in_queue = {e["path"] for e in st["queue"]}
     fresh = []
     for iid, it in items.items():
         if not it["date"]:
             it["date"] = today_str()      # без даты на карточке считаем сегодняшним
         if it["date"] not in ok_dates:
             continue                      # старше недели — не берём вовсе
+        if is_stuck(st, it["path"], it["date"]):
+            continue                      # дважды не ушло на этой версии — не пробуем
+        if st["failed"].get(it["path"]) and \
+                st.get("failed_date", {}).get(it["path"]) != it["date"]:
+            st["failed"].pop(it["path"], None)      # объявление обновилось — снова в игру
         if st["published"].get(it["path"]) == it["date"]:
             continue                      # выходило с этой же датой обновления
         if st["skipped"].get(it["path"]) == it["date"]:
             continue                      # уже отброшено: без фото или без заголовка
+        if it["path"] in in_queue:
+            continue                      # уже в очереди — не дублируем
         fresh.append({"id": iid, "path": it["path"], "date": it["date"]})
 
     if fresh:
