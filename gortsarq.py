@@ -2,24 +2,25 @@
 """
 gortsarq.am -> Telegram («Բարախոլկա Երևան»).
 
-Պորդանոկ աշխատանքի մեկ գործարկման:
- 1. Հրապարակում ենք պատրաստի հերթից — մեկ գրառում։
- 2. Հավաքում ենք վերջին շաբաթվա հայտարարությունները, բայց ոչ ավելի քան MAX_SECONDS։
- 3. Վիճակը պահվում է ամեն աստիճանից հետո։
+Մեկ գործարկում.
+ 1. Հրապարակում ենք հերթից. միայն նկարով։
+ 2. Հավաքում ենք վերջին շաբաթվա հայտարարությունները (ոչ ավելի քան MAX_SECONDS),
+    հերթում պահում ենք նաև գինը, տեղն ու նկարը՝ պահուստի համար։
+ 3. Հերթը մաքրվում է խցանվածներից, կրկնօրինակներից ու անհույսներից։
 
-Հրապարակվում է միայն նկարով հայտարարություն. նկար չկա կամ չիջավ՝ հրապարակում չկա։
-Կոճակը՝ մեկ նկարի դեպքում կցվում է գրառմանը, ալբոմի դեպքում՝ առանձին հաղորդագրությամբ։
-«Сегодня всего»-ն հաշվում է հրապարակման պահով՝ մատյանի (published.json) գրառումներից։
-
-Երկու անգամ չուղարկված հայտարարությունը դեն է նետվում ու այլևս հերթ չի մտնում, որ մեկ
-չուղարկվող գրառումը չխցանի հրապարակման տեղը. եթե կայքում հայտարարությունը թարմանա
-(ամսաթիվը փոխվի), նա նորից հնարավորություն է ստանում։
+Կանոնները.
+ - առանց նկարի գրառում չի դուրս գալիս. նկար չկա՝ հայտարարությունը դուրս է գցվում հերթից,
+ - մի քանի նկարից մեկն էլ ներբեռնվեց -> հրապարակում ենք մեկ նկարով,
+ - եթե կայքի էջը չի բացվում -> աշխատում ենք հերթում պահված գնով ու նկարով,
+ - Telegram-ը չի ընդունում ալբոմը -> ուղարկում ենք մեկ նկարով,
+ - վերջին գրառումից CATCHUP_AFTER անց -> գործարկումը դուրս է բերում մինչև CATCHUP_POSTS։
 """
 import os
 import re
 import json
 import time
 import random
+import urllib.parse
 
 import requests
 
@@ -33,8 +34,9 @@ except ImportError:
 
 GT = chr(62)
 
-TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
-CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+TOKEN    = os.environ.get("TELEGRAM_TOKEN", "")
+CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID", "")
+JINA_KEY = os.environ.get("JINA_KEY", "")
 
 SITE        = "gortsarq"
 STATE       = "state-gortsarq.json"
@@ -45,7 +47,11 @@ FRESH_DAYS  = 7              # берём объявления за послед
 PER_CAT     = 2000           # потолок ссылок на раздел
 MAX_PAGES   = 20             # предохранитель по страницам раздела
 MAX_SECONDS = 15 * 60        # сколько секунд отдаём сбору, остальное — запас
-MAX_TRIES   = 15             # сколько объявлений пробуем за один запуск
+MAX_TRIES   = 25             # сколько объявлений пробуем за один запуск
+MAX_POSTS   = 1              # обычный ритм: одна публикация за запуск
+CATCHUP_AFTER = 90 * 60      # если столько секунд группа молчала — догоняем
+CATCHUP_POSTS = 3            # сколько постов разрешаем в догоняющем запуске
+SEND_TRIES  = 3              # сколько раз пробуем отправить в Telegram
 RESET_ONCE  = False          # однократный сброс очереди (уже сделан)
 TEST        = False
 
@@ -58,7 +64,15 @@ HDRS = {
 }
 
 BLOCKED = ("just a moment", "performing security verification", "checking your browser",
-           "enable javascript", "captcha", "are you a human")
+           "enable javascript", "captcha", "are you a human", "cloudflare",
+           "attention required", "access denied", "ddos-guard")
+
+PROXIES = (
+    "https://api.allorigins.win/raw",     # url передаём параметром
+    "https://api.codetabs.com/v1/proxy",  # url передаём параметром
+    "https://corsproxy.io/?url=",         # url приклеиваем
+    "https://api.cors.lol/?url=",         # url приклеиваем
+)
 
 CATS = [
     "265c-2-ansharj-guyq",          # Անշարժ գույք
@@ -75,9 +89,12 @@ ITEM_RE    = re.compile(r"""https://gortsarq\.am/ru/(\d+)p-[^)\]\s"'""" + GT + r
 ITEM_ID_RE = re.compile(r"/(\d+)p-")
 PHOTO_RE   = re.compile(r"""https://gortsarq\.am/images/detailed/\d+/[^)\]\s"'""" + GT + r"""]+""")
 DATE_RE    = re.compile(r"\d{2}\.\d{2}\.\d{4}")
+PRICE_RE   = re.compile(r"([\d][\d ,\.]*)\s*(֏|\$|€)")
 
 # закрытый телефон: (0x xxx xxxx) и любые похожие наборы «x»
 MASK_RE    = re.compile(r"\(?\s*0?\s*x{2,}[\s\-x]*x{2,}\s*\)?", re.I)
+
+HEAD_FALLBACK = "Новое объявление"
 
 def today_str():
     return time.strftime("%d.%m.%Y", time.gmtime(time.time() + 4 * 3600))
@@ -105,101 +122,113 @@ def good(text):
     low = text.lower()
     return not any(b in low for b in BLOCKED)
 
+def via_proxy(sess, proxy, url, headers, timeout):
+    if proxy.endswith("="):
+        return sess.get(proxy + urllib.parse.quote(url, safe=""),
+                        headers=headers, timeout=timeout)
+    return sess.get(proxy, params={"url": url}, headers=headers, timeout=timeout)
+
 def fetch(sess, url):
-    """Прямой запрос первым, дальше Jina, дальше прокси. По одной попытке."""
-    try:
-        r = sess.get(url, headers=HDRS, timeout=25)
-        if r.status_code == 200 and good(r.text):
-            return to_md(r.text, url)
-        print(f"  прямой {r.status_code}, {len(r.text)} знаков")
-    except Exception as e:
-        print(f"  прямой сбой {type(e).__name__}")
-
-    try:
-        h = dict(HDRS)
-        h["x-engine"] = "browser"
-        r = sess.get("https://r.jina.ai/" + url, headers=h, timeout=40)
-        if r.status_code == 200 and good(r.text):
-            print("  jina")
-            return r.text
-        print(f"  jina {r.status_code}, {len(r.text)} знаков")
-    except Exception as e:
-        print(f"  jina сбой {type(e).__name__}")
-
-    for p in ("https://api.allorigins.win/raw", "https://api.codetabs.com/v1/proxy"):
+    """Ուղիղ -> Jina -> պրոքսիներ, հետո նույնը կրկին։ Մեկ ուղին չի ստացվել՝ փորձում ենք մյուսը։"""
+    for attempt in range(2):
         try:
-            r = sess.get(p, params={"url": url}, headers=HDRS, timeout=40)
+            r = sess.get(url, headers=HDRS, timeout=25)
             if r.status_code == 200 and good(r.text):
-                print("  прокси")
                 return to_md(r.text, url)
-            print(f"  прокси {r.status_code}")
+            print(f"  прямой {r.status_code}, {len(r.text)} знаков")
         except Exception as e:
-            print(f"  прокси сбой {type(e).__name__}")
+            print(f"  прямой сбой {type(e).__name__}")
+
+        try:
+            h = dict(HDRS)
+            h["x-engine"] = "browser"
+            if JINA_KEY:
+                h["Authorization"] = "Bearer " + JINA_KEY
+            r = sess.get("https://r.jina.ai/" + url, headers=h, timeout=45)
+            if r.status_code == 200 and good(r.text):
+                print("  jina")
+                return r.text
+            print(f"  jina {r.status_code}, {len(r.text)} знаков")
+        except Exception as e:
+            print(f"  jina сбой {type(e).__name__}")
+
+        for p in PROXIES:
+            try:
+                r = via_proxy(sess, p, url, HDRS, 45)
+                if r.status_code == 200 and good(r.text):
+                    print("  прокси")
+                    return to_md(r.text, url)
+            except Exception as e:
+                print(f"  прокси сбой {type(e).__name__}")
+
+        if attempt == 0:
+            time.sleep(2)
 
     print("  чтение не удалось:", url)
     return ""
 
 # ---------- նկարներ ----------
 
+THUMBS = ("240/240", "320/320", "480/480", "800/800", "1024/1024")
+
 def thumb_urls(u):
-    """Մեկ նկարի տարբերակները՝ սկզբում մանրը, վերջում՝ ամբողջականը։"""
+    """Մեկ նկարի բոլոր չափերը՝ մանրից մինչև ամբողջականը։"""
     out = []
     if "/images/detailed/" in u:
         tail = u.split("/images/detailed/", 1)[1]
-        for size in ("480/480", "800/800", "1024/1024"):
+        for size in THUMBS:
             out.append(f"{BASE}/images/thumbnails/{size}/detailed/{tail}")
     out.append(u)
     return out
 
 def relay_urls(u):
-    """Շրջանցիկ հասցե. նկարը վերցնում է ուրիշ սերվեր ու տալիս մեզ։"""
+    """Շրջանցիկ հասցեներ. նկարը վերցնում է ուրիշ սերվեր ու տալիս մեզ։"""
     bare = u.split("://", 1)[-1]
-    return [f"https://images.weserv.nl/?url={bare}"]
+    return [f"https://images.weserv.nl/?url={bare}",
+            f"https://images.weserv.nl/?url={bare}&w=800",
+            f"https://wsrv.nl/?url={bare}"]
 
 def img_ok(r):
     """Նման է նկարի՝ ոչ սխալ, ոչ դատարկ ու ոչ HTML։"""
     b = r.content or b""
-    if r.status_code != 200 or len(b) < 1200:
+    if r.status_code != 200 or len(b) < 800:
         return False
     return not b.lstrip()[:1] == b"<"
 
 def bytes_from(sess, url, ref):
-    """Նկարի բայթերը՝ ուղիղ Referer-ով, հետո proxy-ներով, հետո փոխանցիչով։"""
+    """Նկարի բայթերը՝ ուղիղ Referer-ով, հետո պրոքսիներով, հետո փոխանցիչով։"""
     h = dict(HDRS)
     h["Referer"] = ref or BASE + "/"
     h["Accept"] = "image/avif,image/webp,image/jpeg,image/*,*/*;q=0.8"
 
     try:
-        r = sess.get(url, headers=h, timeout=30)
+        r = sess.get(url, headers=h, timeout=25)
         if img_ok(r):
             return r.content
-        print(f"  նկար ուղիղ {r.status_code}, {len(r.content or b'')} բայթ")
     except Exception as e:
         print(f"  նկար ուղիղ սխալ {type(e).__name__}")
 
-    for p in ("https://api.allorigins.win/raw", "https://api.codetabs.com/v1/proxy"):
+    for p in PROXIES:
         try:
-            r = sess.get(p, params={"url": url}, headers=h, timeout=60)
+            r = via_proxy(sess, p, url, h, 45)
             if img_ok(r):
                 print("  նկար proxy")
                 return r.content
-            print(f"  նկար proxy {r.status_code}")
         except Exception as e:
             print(f"  նկար proxy սխալ {type(e).__name__}")
 
     for p in relay_urls(url):
         try:
-            r = sess.get(p, headers=h, timeout=60)
+            r = sess.get(p, headers=h, timeout=45)
             if img_ok(r):
                 print("  նկար փոխանցիչ")
                 return r.content
-            print(f"  նկար փոխանցիչ {r.status_code}")
         except Exception as e:
             print(f"  նկար փոխանցիչ սխալ {type(e).__name__}")
     return None
 
 def photo_bytes(sess, url, ref):
-    """Նկարը ներբեռնում ենք ինքներս։ Ուղիղ հղումով Telegram-ը դա չի անում։"""
+    """Նկարը ներբեռնում ենք ինքներս՝ բոլոր չափերով ու ուղիներով։"""
     for u in thumb_urls(url):
         b = bytes_from(sess, u, ref)
         if b:
@@ -210,7 +239,7 @@ def photo_bytes(sess, url, ref):
 # ---------- разбор ----------
 
 def get_items(sess, deadline):
-    """Ссылки разделов, пока идут новые и пока на странице есть свежее."""
+    """Հղումներն ու քարտի տվյալները՝ ըստ բաժինների։ Պահում ենք գինն ու նկարը որպես պահուստ։"""
     ok_dates = last_days(FRESH_DAYS)
     found = {}
     for cat in CATS:
@@ -232,11 +261,25 @@ def get_items(sess, deadline):
                 date = d.group(0) if d else ""
                 if date and date in ok_dates:
                     fresh += 1
+                price = ""
+                pm = PRICE_RE.search(tail)
+                if pm:
+                    price = " ".join(pm.group(1).split()) + " " + pm.group(2)
+                photo = ""
+                ph = PHOTO_RE.search(tail)
+                if ph:
+                    photo = ph.group(0).split("]")[0].split(")")[0]
                 if iid not in found:
-                    found[iid] = {"path": path, "date": date}
+                    found[iid] = {"path": path, "date": date,
+                                  "price": price, "photo": photo}
                     n += 1
-                elif date and not found[iid]["date"]:
-                    found[iid]["date"] = date
+                else:
+                    if date and not found[iid]["date"]:
+                        found[iid]["date"] = date
+                    if price and not found[iid]["price"]:
+                        found[iid]["price"] = price
+                    if photo and not found[iid]["photo"]:
+                        found[iid]["photo"] = photo
             per_cat += n
             print(f"[{cat}] стр.{page}: новых {n}, свежих {fresh}")
             if n == 0 or per_cat >= PER_CAT:
@@ -261,7 +304,7 @@ def item_data(sess, path):
         title = scrub(m.group(1).strip())
 
     price = ""
-    m = re.search(r"([\d][\d ,\.]*)\s*(֏|\$|€)", md)
+    m = PRICE_RE.search(md)
     if m:
         num = " ".join(re.sub(r"[.,]00$", "", m.group(1).strip()).split())
         if re.search(r"[1-9]", num):
@@ -293,14 +336,14 @@ def item_data(sess, path):
 # ---------- текст ----------
 
 def headline(sess, d):
-    src = scrub((d["title"] or "").strip())
-    t = scrub(translate(sess, src).strip())
-    if is_translit_hy(src) or is_translit_hy(t):
+    src = scrub((d.get("title") or "").strip())
+    t = scrub(translate(sess, src).strip()) if src else ""
+    if src and (is_translit_hy(src) or is_translit_hy(t)):
         return ""
     # инфинитив вроде «Одеваться» заголовком не ставим
     if t and not re.search(r"(?:ться|тись)$", t.lower()) and (has_cyr(t) or script(t) == "lat"):
         return " ".join(t.split())[:90]
-    alt = scrub(translate(sess, d["desc"][:300]).strip())
+    alt = scrub(translate(sess, (d.get("desc") or "")[:300]).strip())
     if has_cyr(alt) and len(alt.split()) >= 3:
         return " ".join(re.split(r"[.!?]\s", alt)[0].strip().split())[:90]
     if t and (has_cyr(t) or script(t) == "lat"):
@@ -310,27 +353,41 @@ def headline(sess, d):
 def make_caption(sess, d):
     head = headline(sess, d)
     if not head:
-        return ""
+        head = HEAD_FALLBACK           # էջը չի բացվել՝ գրառումը միևնույն է դուրս է գալիս նկարով
     lines = [head]
-    if d["price"]:
+    if d.get("price"):
         lines.append(d["price"])
-    if d["place"]:
+    if d.get("place"):
         lines.append(d["place"])
-    if d["desc"]:
+    if d.get("desc"):
         lines.append(scrub(translate(sess, d["desc"][:700])))
     lines = [" ".join(scrub(x).split()) for x in lines if x]
     return "\n\n".join(lines)[:1024]
 
 # ---------- Telegram ----------
 
-def send(sess, d, caption):
-    """Նկարները ներբեռնում ենք ինքներս ու ուղարկում ֆայլով։
-    Նկար չիջավ՝ չենք հրապարակում, հայտարարությունը կվերադառնա հերթ։
-    Ալբոմից հետո կոճակը գնում է առանձին հաղորդագրությամբ։"""
-    markup = {"inline_keyboard": [[{"text": "Связаться", "url": d["url"]}]]}
+def tg_post(sess, method, data, files=None, timeout=90):
+    """Ուղարկում՝ կրկնումներով։ Ցանցի կամ Telegram-ի դադարը գրառումը չի կանգնեցնում։"""
+    for attempt in range(SEND_TRIES):
+        try:
+            r = sess.post(f"https://api.telegram.org/bot{TOKEN}/{method}",
+                          data=data, files=files, timeout=timeout)
+            print(f"telegram {method}:", r.status_code, r.text[:160])
+            if r.ok:
+                return r
+            if r.status_code in (429, 500, 502, 503, 504):
+                time.sleep(5 * (attempt + 1))
+                continue
+            return None
+        except Exception as e:
+            print(f"telegram {method} սխալ {type(e).__name__}")
+            time.sleep(5 * (attempt + 1))
+    return None
 
+def send(sess, d, caption):
+    """Ալբոմ -> մեկ նկար։ Առանց նկարի գրառում չի ուղարկվում։"""
     blobs = []
-    for u in d["photos"][:10]:
+    for u in (d.get("photos") or [])[:10]:
         b = photo_bytes(sess, u, d["url"])
         if b:
             blobs.append(b)
@@ -339,17 +396,17 @@ def send(sess, d, caption):
         print("  նկարները չներբեռնվեցին, հրապարակում չկա")
         return False
 
+    markup = {"inline_keyboard": [[{"text": "Связаться", "url": d["url"]}]]}
+
     if len(blobs) >= 2:
         files = {f"p{i}": (f"p{i}.jpg", b) for i, b in enumerate(blobs)}
         media = [{"type": "photo", "media": "attach://p0", "caption": caption}]
         for i in range(1, len(blobs)):
             media.append({"type": "photo", "media": f"attach://p{i}"})
-        r = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendMediaGroup",
-                      data={"chat_id": CHAT_ID,
-                            "media": json.dumps(media, ensure_ascii=False)},
-                      files=files, timeout=120)
-        print("telegram album:", r.status_code, r.text[:200])
-        if r.ok:
+        r = tg_post(sess, "sendMediaGroup",
+                    {"chat_id": CHAT_ID, "media": json.dumps(media, ensure_ascii=False)},
+                    files=files, timeout=150)
+        if r is not None:
             mid = None
             try:
                 res = r.json().get("result") or []
@@ -361,18 +418,15 @@ def send(sess, d, caption):
                        "reply_markup": json.dumps(markup)}
             if mid:
                 payload["reply_parameters"] = json.dumps({"message_id": mid})
-            r2 = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-                           data=payload, timeout=40)
-            print("telegram кнопка:", r2.status_code, r2.text[:200])
-            return bool(r2.ok)
+            tg_post(sess, "sendMessage", payload, timeout=40)
+            return True                # ալբոմը խմբում է՝ գրառումը եղավ
         print("  ալբոմը չանցավ, փորձում ենք մեկ նկարով")
 
-    r = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendPhoto",
-                  data={"chat_id": CHAT_ID, "caption": caption,
-                        "reply_markup": json.dumps(markup)},
-                  files={"photo": ("p.jpg", blobs[0])}, timeout=90)
-    print("telegram:", r.status_code, r.text[:200])
-    return bool(r.ok)
+    r = tg_post(sess, "sendPhoto",
+                {"chat_id": CHAT_ID, "caption": caption,
+                 "reply_markup": json.dumps(markup)},
+                files={"photo": ("p.jpg", blobs[0])}, timeout=120)
+    return r is not None
 
 # ---------- состояние ----------
 
@@ -389,8 +443,7 @@ def save(st):
     json.dump(st, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
 
 def led_today():
-    """Քանի գրառում է դուրս եկել այսօր՝ ըստ հրապարակման ժամանակի։
-    Թիվը վերցնում ենք մատյանից (published.json), ոչ թե հայտարարության ամսաթվից։"""
+    """Քանի գրառում է դուրս եկել այսօր՝ ըստ հրապարակման ժամանակի։"""
     try:
         led = json.load(open(LED, encoding="utf-8"))
     except Exception:
@@ -409,7 +462,7 @@ def led_today():
     return n
 
 def norm_queue(st):
-    """Очередь — словари {id, path, date}; старые строки-пути тоже принимаем."""
+    """Очередь — словари {id, path, date, price, place, photo}; старые строки тоже принимаем."""
     q = []
     for e in st.get("queue", []):
         if isinstance(e, dict) and e.get("path"):
@@ -418,11 +471,14 @@ def norm_queue(st):
             if not iid:
                 m = ITEM_ID_RE.search(p)
                 iid = m.group(1) if m else p
-            q.append({"id": iid, "path": p, "date": e.get("date", "")})
+            q.append({"id": iid, "path": p, "date": e.get("date", ""),
+                      "price": e.get("price", ""), "place": e.get("place", ""),
+                      "photo": e.get("photo", "")})
         elif isinstance(e, str):
             p = e.split("]")[0].split(")")[0]
             m = ITEM_ID_RE.search(p)
-            q.append({"id": m.group(1) if m else p, "path": p, "date": ""})
+            q.append({"id": m.group(1) if m else p, "path": p, "date": "",
+                      "price": "", "place": "", "photo": ""})
     st["queue"] = q
 
 def norm_published(st):
@@ -467,38 +523,47 @@ def publish_one(sess, st, e, now):
     iid = e.get("id") or ""
     if st["published"].get(path) == e.get("date"):
         return "skip"                  # выходило с этой же датой обновления
+
     d = None
     try:
         d = item_data(sess, path)
     except Exception as ex:
         print("ошибка разбора:", ex)
+
     if not d:
-        print("  страница не открылась, пропускаем:", iid)
-        n = mark_failed(st, path, e.get("date"))
-        if n >= 2:
-            print("  брошен: страница не открылась 2 раза")
-        return "drop"
-    if not d["photos"]:
-        print("  без фото, пропускаем:", iid)
+        print("  էջը չի բացվում — փորձում ենք հերթում պահված տվյալներով:", iid)
+        photos = [e["photo"]] if e.get("photo") else []
+        d = {"title": "", "price": e.get("price", ""), "desc": "",
+             "place": e.get("place", ""), "photos": photos, "url": BASE + path}
+    else:
+        if not d.get("price") and e.get("price"):
+            d["price"] = e["price"]
+        if not d.get("photos") and e.get("photo"):
+            d["photos"] = [e["photo"]]
+
+    if not d.get("photos"):
+        print("  նկար չկա, դուրս ենք գցում հերթից:", iid)
         st["skipped"][path] = e.get("date") or today_str()
         return "drop"
+
     cap = make_caption(sess, d)
     if not cap:
-        print("  без заголовка (латиницей армянский или пусто), пропускаем:", iid)
+        print("  դատարկ հայտարարություն, դուրս ենք գցում հերթից:", iid)
         st["skipped"][path] = e.get("date") or today_str()
         return "drop"
+
     if send(sess, d, cap):
         st["last_publish"] = now
         st["published"][path] = e.get("date") or today_str()
         st["failed"].pop(path, None)
         st.setdefault("failed_date", {}).pop(path, None)
         led_add(SITE, iid, now)
-        print(f"опубликовано: {iid} ({path}) фото {len(d['photos'])}")
+        print(f"опубликовано: {iid} ({path}) фото {len(d.get('photos') or [])}")
         return "ok"
     return "fail"
 
 def publish_phase(sess, st, now, limit=1):
-    """Публикуем из очереди: не больше limit постов, не больше MAX_TRIES попыток."""
+    """Հրապարակում ենք հերթից՝ ոչ ավելի քան limit գրառում և MAX_TRIES փորձ։"""
     done, tried = 0, 0
     while st["queue"] and done < limit and tried < MAX_TRIES:
         if now - st["last_publish"] < INTERVAL:
@@ -539,8 +604,14 @@ def main():
         st["reset_done2"] = True
         print("очистка: очередь сброшена")
 
-    # 1. публикация из уже собранной очереди — до всякого сбора
-    done = publish_phase(sess, st, now, 1)
+    # խումբը երկար լուռ է եղել՝ այս գործարկումը դուրս է բերում մի քանի գրառում
+    gap = now - st["last_publish"]
+    limit = CATCHUP_POSTS if gap >= CATCHUP_AFTER else MAX_POSTS
+    if limit != MAX_POSTS:
+        print(f"догоняем: группа молчит {int(gap / 60)} мин, до {limit} постов")
+
+    # 1. Հրապարակում ենք հավաքված հերթից՝ մինչև որևէ ստուգում
+    done = publish_phase(sess, st, now, limit)
     save(st)
 
     if TEST:
@@ -550,7 +621,7 @@ def main():
                 print("фото:", len(d["photos"]), "заголовок:", d["title"])
         return done
 
-    # 2. сбор объявлений за неделю, пока хватает времени
+    # 2. Հավաքում ենք վերջին շաբաթվա հայտարարությունները
     items = get_items(sess, deadline)
     print("всего найдено:", len(items))
 
@@ -570,10 +641,12 @@ def main():
         if st["published"].get(it["path"]) == it["date"]:
             continue                      # выходило с этой же датой обновления
         if st["skipped"].get(it["path"]) == it["date"]:
-            continue                      # уже отброшено: без фото или без заголовка
+            continue                      # уже отброшено
         if it["path"] in in_queue:
             continue                      # уже в очереди — не дублируем
-        fresh.append({"id": iid, "path": it["path"], "date": it["date"]})
+        fresh.append({"id": iid, "path": it["path"], "date": it["date"],
+                      "price": it.get("price", ""), "place": "",
+                      "photo": it.get("photo", "")})
 
     if fresh:
         st["queue"].extend(fresh)
@@ -583,12 +656,12 @@ def main():
     print("свежих за неделю:", len(fresh), "| очередь:", len(st["queue"]))
     save(st)
 
-    # 3. перемешиваем, чтобы разделы шли вперемешку
+    # 3. Խառնում ենք, որ բաժինները հերթով գնան
     random.shuffle(st["queue"])
 
-    # 4. если очередь была пуста и только что наполнилась — публикуем
-    if done == 0 and st["queue"]:
-        done += publish_phase(sess, st, time.time(), 1)
+    # 4. Եթե այս գործարկումում դեռ ոչինչ դուրս չի եկել՝ փորձում ենք նորից
+    if done < limit and st["queue"]:
+        done += publish_phase(sess, st, time.time(), limit - done)
 
     if len(st["published"]) > 50000:
         keys = list(st["published"])[-20000:]
