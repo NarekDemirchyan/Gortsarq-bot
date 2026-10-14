@@ -965,3 +965,46 @@ def main():
     except Exception as ex:
         print("union:", ex)
     return res
+# ===== UNION ուղղում. նիկը՝ լենտայից, առանց ամեն էջը բացելու =====
+MAX_SECONDS = 4 * 60      # հավաքումը՝ 4 րոպե (առաջ 15)
+MAX_PAGES   = 5           # բաժնի էջերի առաստաղ (առաջ 20)
+
+_NICK_CACHE = {}
+
+def _union_nick_from_chunk(chunk):
+    for m in UNION_NICK_RE.finditer(chunk):
+        n = m.group(1)
+        if n.lower() not in NICK_STOP:
+            return n
+    return ""
+
+_OLD_UNION_ITEMS = union_items
+
+def union_items(md, secs):
+    items = _OLD_UNION_ITEMS(md, secs)
+    hits = [(m.group(1), m.start(), m.end()) for m in UNION_AD_RE.finditer(md)]
+    for date, aid, it in items:
+        k = None
+        for j, h in enumerate(hits):
+            if h[0] == aid:
+                k = j
+                break
+        if k is None:
+            it["nick"] = ""
+            continue
+        start = hits[k][1]
+        prev_end = hits[k - 1][2] if k else 0
+        it["nick"] = _union_nick_from_chunk(md[prev_end:start])
+        _NICK_CACHE[aid] = it["nick"]
+    return items
+
+def union_nick(sess, aid):
+    return _NICK_CACHE.get(aid, "")
+
+_OLD_UNION_CAPTION = union_caption
+
+def union_caption(e):
+    cap = _OLD_UNION_CAPTION(e)
+    if not e.get("nick") and "unionapp.net/en/ad/" not in cap:
+        cap = (cap + "\n\nhttps://unionapp.net/en/ad/" + str(e.get("id")))[:1024]
+    return cap
