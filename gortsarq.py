@@ -1277,5 +1277,16 @@ def union_harvest():
     save(st)
     print("union՝ ավելացվեց %d | հերթում %d" % (added, len(st["queue"])))
     return added
+# ---- ուղղում. նկարները՝ ամբողջ չափով, ոչ 240×240 ----
+_THUMBS_DESC = ("1024/1024", "800/800", "480/480", "320/320", "240/240")
+
+def thumb_urls(u):
+    out = []
+    if "/images/detailed/" in u:
+        tail = u.split("/images/detailed/", 1)[1]
+        for size in _THUMBS_DESC:
+            out.append(BASE + "/images/thumbnails/" + size + "/detailed/" + tail)
+    out.insert(0, u)
+    return out
 if __name__ == "__main__":
     main()
