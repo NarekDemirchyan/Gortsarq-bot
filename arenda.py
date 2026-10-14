@@ -767,7 +767,7 @@ def main():
     st.setdefault("failed", {})
     st.setdefault("published", {})
     st.setdefault("skipped", {})
-st.setdefault("last_publish", 0)
+    st.setdefault("last_publish", 0)
     norm_queue(st)
     sess = requests.Session()
     now = time.time()
