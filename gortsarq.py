@@ -1203,5 +1203,23 @@ def _orig_publish_one(sess, st, e, now):
                                 or str(e.get("path") or "").startswith("union:")):
         return union_publish_one(sess, st, e, now)
     return _OLD_ORIG2(sess, st, e, now)
+# ---- ուղղում. կեղծ նիկը (@context) չի հայտնվում գրառման մեջ ----
+_NICK_JUNK = ("context", "type", "id", "graph", "unionapp_bot", "union", "share", "telegram")
+_OLD_UNION_PUB3 = union_publish_one
+
+def union_publish_one(sess, st, e, now):
+    if isinstance(e, dict) and (e.get("src") == "union"
+                                or str(e.get("path") or "").startswith("union:")):
+        n = ""
+        try:
+            txt = union_read(sess, "https://unionapp.net/en/ad/" + str(e.get("id")), raw=True)
+            n = _union_nick_from_chunk(txt)
+        except Exception:
+            n = ""
+        if not n or str(n).lower() in _NICK_JUNK:
+            e["nick"] = ""
+        else:
+            e["nick"] = n
+    return _OLD_UNION_PUB3(sess, st, e, now)
 if __name__ == "__main__":
     main()
