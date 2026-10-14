@@ -1302,7 +1302,6 @@ def union_publish_one(sess, st, e, now):
         if e.get("photos"):
             e["photos"] = [_union_big(x) for x in e["photos"]]
     return _OLD_UNION_PUB4(sess, st, e, now)
-UNION_FEEDS = tuple((name, str(url).replace("/en/", "/ru/")) for name, url in UNION_FEEDS)
 if __name__ == "__main__": main()
 
 try:
