@@ -625,6 +625,8 @@ def main():
     st.setdefault("published", {})
     st.setdefault("skipped", {})
     st.setdefault("last_publish", 0)
+    st.pop("seen", None)
+    st.pop("hold", None)
     norm_queue(st)
     sess = requests.Session()
     now = time.time()
