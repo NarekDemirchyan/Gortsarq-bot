@@ -695,44 +695,48 @@ def publish_one(sess, st, e, now):
             for k in list(day)[:12000]:
                 day.pop(k, None)
     return res
-# ===== UNION (Երևան + Գյումրի) =====
-UNION_FEEDS = (("Երևան", "https://unionapp.net/ru/sell/armenia/yerevan"),
-               ("Գյումրի", "https://unionapp.net/ru/sell/armenia/gyumri"))
-UNION_TAKE = 60
-UNION_AD_RE = re.compile(r"https://unionapp\.net/(?:ru/|en/)?ad/([a-z0-9]{6,})")
+# ===== UNION (ամբողջ Հայաստանը՝ և Երևան, և Գյումրի) =====
+# Կայքում առանձին քաղաքի էջ չկա. մեկ լենտա է՝ unionapp.net/en/armenia։
+UNION_FEEDS = (("Հայաստան", "https://unionapp.net/en/armenia"),)
+UNION_TAKE = 25
+UNION_AD_RE = re.compile(r"https://unionapp\.net/(?:en|ru)/ad/([a-z0-9]{6,})")
 UNION_IMG_RE = re.compile(r"https://media\.unionapp\.net/ads/[a-z0-9_]+\.webp")
-UNION_NICK_RE = re.compile(r"https://t\.me/([A-Za-z0-9_]{4,32})(?:\?|\"|\)|<|$)")
+UNION_NICK_RE = re.compile(r"(?:https://t\.me/|t\.me/|@)([A-Za-z0-9_]{4,32})")
 UNION_SEC_RE = re.compile(r"(?:^|\n)\s*(?:#{2,4}\s*|<h[1-4][^>]*>)\s*(\d{1,2})\s+([A-Za-zА-Яа-я]+)")
 UNION_MON = {"january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
              "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
              "января": 1, "февраля": 2, "марта": 3, "апреля": 4, "мая": 5, "июня": 6,
              "июля": 7, "августа": 8, "сентября": 9, "октября": 10, "ноября": 11, "декабря": 12}
+NICK_STOP = ("unionapp_bot", "union", "share", "telegram")
 
-def union_read(sess, url):
+def union_read(sess, url, raw=False):
+    """Կայքը աշխատում է ջինայի միջոցով (ուղիղ ու պրոքսիները փակվում են)։"""
     H = dict(HDRS)
     H["Referer"] = "https://unionapp.net/"
+    H["x-engine"] = "browser"
+    if raw:
+        H["x-return-format"] = "html"
+    if JINA_KEY:
+        H["Authorization"] = "Bearer " + JINA_KEY
     for attempt in (0, 1):
         try:
-            r = sess.get(url, headers=H, timeout=25)
-            if r.status_code == 200 and len(r.text) > 1500 and not any(b in r.text.lower() for b in BLOCKED):
-                return r.text
-        except Exception as ex:
-            print("union ուղիղ:", ex)
-        try:
-            H2 = dict(H)
-            H2["x-engine"] = "browser"
-            if JINA_KEY:
-                H2["Authorization"] = "Bearer " + JINA_KEY
-            r = sess.get("https://r.jina.ai/" + url, headers=H2, timeout=45)
-            if r.status_code == 200 and len(r.text) > 800:
+            r = sess.get("https://r.jina.ai/" + url, headers=H, timeout=60)
+            if r.status_code == 200 and len(r.text) > 1000 and "does not exist" not in r.text:
                 print("union jina")
                 return r.text
+            print("union jina", r.status_code, len(r.text))
         except Exception as ex:
-            print("union jina:", ex)
+            print("union jina սխալ:", ex)
+        try:
+            r = sess.get(url, headers=HDRS, timeout=25)
+            if r.status_code == 200 and len(r.text) > 1500 and "does not exist" not in r.text:
+                return r.text
+        except Exception as ex:
+            print("union ուղիղ սխալ:", ex)
         for p in PROXIES:
             try:
-                r = via_proxy(sess, p, url, H, 45)
-                if r.status_code == 200 and len(r.text) > 1500:
+                r = via_proxy(sess, p, url, HDRS, 45)
+                if r.status_code == 200 and len(r.text) > 1500 and "does not exist" not in r.text:
                     return r.text
             except Exception:
                 pass
@@ -755,17 +759,73 @@ def union_sections(md):
         out.append(("%02d.%02d.%d" % (day, mon, year), m.end()))
     return out
 
+def union_items(md, secs):
+    """Լենտայից՝ ամեն հայտարարության ամսաթիվը, համարը, վերնագիրը, գինը, քաղաքն ու նկարները։"""
+    out, seen = [], set()
+    ms = list(UNION_AD_RE.finditer(md))
+    for i, m in enumerate(ms):
+        aid = m.group(1)
+        if aid in seen:
+            continue
+        seen.add(aid)
+        chunk = md[ms[i - 1].end() if i else 0:m.start()]
+        date = ""
+        for d, pos in secs:
+            if pos <= m.start():
+                date = d
+            else:
+                break
+        title = ""
+        for tm in re.finditer(r"###\s+(.+)", chunk[-400:]):
+            title = scrub(tm.group(1))
+        city = ""
+        cm = re.search(r"(?:For sale|Wanted|Продажа|Куплю)\s*·\s*([^·\n#]+)", chunk)
+        if cm:
+            city = " ".join(cm.group(1).split())
+        price = ""
+        pm = re.search(r"([\d][\d ,\.]*)\s*֏", chunk)
+        if pm:
+            price = " ".join(pm.group(1).split()) + " ֏"
+        desc = ""
+        dm = re.search(r"###\s+.+?\n(.+)", chunk, re.S)
+        if dm:
+            desc = scrub(" ".join(dm.group(1).split()))[:700]
+        photos, ps = [], set()
+        for im in UNION_IMG_RE.finditer(chunk):
+            if im.group(0) not in ps:
+                ps.add(im.group(0))
+                photos.append(im.group(0))
+        out.append((date or today_str(), aid,
+                    {"title": title, "desc": desc, "price": price,
+                     "city": city, "photos": photos}))
+    return out
+
+def union_nick(sess, aid):
+    """Վաճառողի նիկը՝ հայտարարության սեփական էջից։ Չգտնվի՝ դատարկ։"""
+    for url in ("https://unionapp.net/en/ad/" + aid, "https://unionapp.net/ad/" + aid):
+        txt = union_read(sess, url, raw=True)
+        if not txt:
+            continue
+        for m in UNION_NICK_RE.finditer(txt):
+            n = m.group(1)
+            if n.lower() not in NICK_STOP:
+                return n
+    return ""
+
 def union_photo(sess, u):
+    """Նկարը։ Առաջին հերթին թարգմանիչով (այնտեղից գալիս է jpg), հետո ինքը կայքից։"""
     H = dict(HDRS)
     H["Referer"] = "https://unionapp.net/"
     H["Accept"] = "image/avif,image/webp,image/jpeg,image/*,*/*;q=0.8"
-    for cand in (u.replace("_thumbnail", ""), u):
+    full = u.replace("_thumbnail", "")
+    bare = full.split("://", 1)[-1]
+    for cand in ("https://images.weserv.nl/?url=" + bare + "&output=jpg", full, u):
         try:
-            r = sess.get(cand, headers=H, timeout=25)
+            r = sess.get(cand, headers=H, timeout=30)
             if img_ok(r):
                 return r.content
         except Exception as ex:
-            print("union նկար:", ex)
+            print("union նկար սխալ:", ex)
         for p in PROXIES:
             try:
                 r = via_proxy(sess, p, cand, H, 45)
@@ -776,48 +836,15 @@ def union_photo(sess, u):
     print("union՝ նկարը չիջավ:", u)
     return None
 
-def union_card(sess, aid, date, city):
-    md = union_read(sess, "https://unionapp.net/ru/ad/" + aid) or union_read(sess, "https://unionapp.net/ad/" + aid)
-    if not md:
-        return None
-    m = UNION_NICK_RE.search(md)
-    nick = m.group(1) if m else ""
-    if not nick:
-        print("union %s՝ նիկ չկա" % aid)
-        return None
-    title = ""
-    for m in re.finditer(r"^\s*#\s+(.+)$", md, re.M):
-        title = scrub(m.group(1))
-    if not title:
-        m = re.search(r"<title[^>]*>(.+?)</title>", md, re.S)
-        if m:
-            title = scrub(re.sub(r"<[^>]+>", " ", m.group(1)))
-    desc = ""
-    m = re.search(r"(?:Описание|Description)\s*\n+(.+?)(?:\n\s*(?:Report this ad|Пожаловаться|#\s))", md, re.S)
-    if m:
-        desc = scrub(" ".join(m.group(1).split()))
-    price = ""
-    m = PRICE_RE.search(md)
-    if m:
-        price = " ".join(m.group(1).split()) + " " + m.group(2)
-    photos, seen = [], set()
-    for m in UNION_IMG_RE.finditer(md):
-        u = m.group(0).replace("_thumbnail", "")
-        if u not in seen:
-            seen.add(u)
-            photos.append(u)
-    if not photos:
-        print("union %s՝ լուսանկար չկա" % aid)
-        return None
-    if not title:
-        title = HEAD_FALLBACK
-    return {"src": "union", "id": aid, "path": "union:" + aid, "date": date or today_str(),
-            "nick": nick, "title": title, "desc": desc, "price": price,
-            "place": "", "city": city, "photo": photos[0], "photos": photos[:10]}
-
 def union_send(sess, e, cap):
-    blobs = [b for b in (union_photo(sess, u) for u in (e.get("photos") or [])[:10]) if b]
+    """Միայն լուսանկարներ ու տեքստ։ Կոճակ չկա։"""
+    blobs = []
+    for u in (e.get("photos") or [])[:10]:
+        b = union_photo(sess, u)
+        if b:
+            blobs.append(b)
     if not blobs:
+        print("union՝ լուսանկարները չիջան")
         return False
     if len(blobs) >= 2:
         files = {("p%d" % i): ("p%d.jpg" % i, b) for i, b in enumerate(blobs)}
@@ -828,6 +855,7 @@ def union_send(sess, e, cap):
                    {"chat_id": CHAT_ID, "media": json.dumps(media, ensure_ascii=False)},
                    files=files, timeout=150) is not None:
             return True
+        print("union՝ ալբոմը չանցավ, մեկ նկարով")
     return tg_post(sess, "sendPhoto", {"chat_id": CHAT_ID, "caption": cap},
                    files={"photo": ("p.jpg", blobs[0])}, timeout=120) is not None
 
@@ -837,15 +865,15 @@ def union_caption(e):
         parts.append(e["desc"][:700])
     if e.get("price"):
         parts.append(e["price"])
-    parts.append("@" + (e.get("nick") or ""))
+    if e.get("place"):
+        parts.append(e["place"])
+    if e.get("nick"):
+        parts.append("@" + e["nick"])
     return "\n\n".join(" ".join(p.split()) for p in parts if p)[:1024]
 
 def union_publish_one(sess, st, e, now):
     path = e.get("path") or ("union:" + str(e.get("id")))
-    if not e.get("nick") or not union_send(sess, e, union_caption(e)):
-        if not e.get("nick"):
-            st["skipped"][path] = e.get("date") or today_str()
-            return "drop"
+    if not union_send(sess, e, union_caption(e)):
         return "fail"
     st["last_publish"] = now
     st["published"][path] = e.get("date") or today_str()
@@ -855,12 +883,13 @@ def union_publish_one(sess, st, e, now):
         led_add("union", str(e.get("id")), now)
     except Exception:
         pass
-    print("опубликовано union: %s @%s" % (e.get("id"), e.get("nick")))
+    print("опубликовано union: %s @%s" % (e.get("id"), e.get("nick") or "-"))
     return "ok"
 
 def union_harvest():
     st = load()
-    for k, v in (("queue", []), ("published", {}), ("skipped", {}), ("failed", {}), ("failed_date", {})):
+    for k, v in (("queue", []), ("published", {}), ("skipped", {}),
+                 ("failed", {}), ("failed_date", {}), ("nicks", {})):
         st.setdefault(k, v)
     sess = requests.Session()
     in_q = set(e.get("path") for e in st["queue"] if isinstance(e, dict))
@@ -872,21 +901,9 @@ def union_harvest():
             print("[union][%s] լենտան չբացվեց" % city)
             continue
         secs = union_sections(md)
-        found, seen = [], set()
-        for m in UNION_AD_RE.finditer(md):
-            aid = m.group(1)
-            if aid in seen:
-                continue
-            seen.add(aid)
-            date = ""
-            for d, pos in secs:
-                if pos <= m.start():
-                    date = d
-                else:
-                    break
-            found.append((date or today_str(), aid))
-        print("[union][%s] լենտայում %d, ամսաթվեր %d" % (city, len(found), len(secs)))
-        for date, aid in found:
+        found = union_items(md, secs)
+        print("[union][%s] լենտայում %d, ամսաթիվ %d" % (city, len(found), len(secs)))
+        for date, aid, it in found:
             if added >= UNION_TAKE:
                 break
             path = "union:" + aid
@@ -896,15 +913,30 @@ def union_harvest():
                 continue
             if is_stuck(st, path, date):
                 continue
-            e = union_card(sess, aid, date, city)
-            if not e:
+            if not it["photos"]:
                 st["skipped"][path] = date
                 continue
-            st["queue"].append(e)
+            nick = st["nicks"].get(aid)
+            if nick is None:
+                nick = union_nick(sess, aid)
+                st["nicks"][aid] = nick
+                if len(st["nicks"]) > 3000:
+                    for k in list(st["nicks"])[:1000]:
+                        st["nicks"].pop(k, None)
+            st["queue"].append({"src": "union", "id": aid, "path": path, "date": date,
+                                "nick": nick or "", "title": it["title"] or HEAD_FALLBACK,
+                                "desc": it["desc"], "price": it["price"],
+                                "place": it["city"], "photo": it["photos"][0],
+                                "photos": it["photos"][:10]})
             in_q.add(path)
             added += 1
-            print("[union] %s @%s | %s" % (aid, e["nick"], e["title"][:60]))
+            print("[union] %s @%s | %s" % (aid, nick or "-", it["title"][:60]))
             time.sleep(1)
+    # թարմ Union-ի գրառումները դնում ենք հերթի գլուխ, որ չսպասեն gortsarq-ի հին հերթին
+    uni = [e for e in st["queue"] if e.get("src") == "union"]
+    rest = [e for e in st["queue"] if e.get("src") != "union"]
+    random.shuffle(uni)
+    st["queue"] = uni[:12] + rest + uni[12:]
     while len(st["queue"]) > QUEUE_MAX:
         st["queue"].pop(0)
     save(st)
@@ -933,3 +965,4 @@ def main():
     except Exception as ex:
         print("union:", ex)
     return res
+
