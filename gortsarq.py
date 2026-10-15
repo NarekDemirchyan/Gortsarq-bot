@@ -37,7 +37,7 @@ INTERVAL    = 0
 QUEUE_MAX   = 8000
 FRESH_DAYS  = 60
 PER_CAT     = 2000
-MAX_SECONDS = 900
+MAX_SECONDS = 1500
 MAX_PAGES   = 40
 MAX_TRIES   = 4
 MAX_POSTS   = 1
@@ -69,14 +69,18 @@ PROXIES = (
 )
 
 CATS = [
-    "265c-2-ansharj-guyq",
-    "1796c-pahestamaser",
-    "1875c-kendaniner",
-    "1904c-elektronika-hy",
-    "2063c-tun-ev-aygi",
-    "2116c-noradzevutyun-ev-och",
-    "2295c-mankakan-ashxarh",
-    "2328c-hobbi-hangist-ev-sport",
+    "265c-2-ansharj-guyq",          # Անշարժ գույք
+    "1796c-pahestamaser",           # Պահեստամասեր
+    "1875c-kendaniner",             # Կենդանիներ
+    "1904c-elektronika-hy",         # Էլեկտրոնիկա
+    "2063c-tun-ev-aygi",            # Տուն և այգի
+    "2116c-noradzevutyun-ev-och",   # Նորաձևություն և ոճ
+    "2295c-mankakan-ashxarh",       # Մանկական աշխարհ
+    "2328c-hobbi-hangist-ev-sport", # Հոբբի, հանգիստ և սպորտ
+    "2377c-transport",              # Տրանսպորտ
+    "1658c-biznes-i-uslugi-ru",     # Բիզնես և ծառայություններ
+    "2034c-arenda-i-prokat-ru",     # Վարձույթ և պրոկատ
+    "1485c-rabota-ru",              # Աշխատանք
 ]
 
 ITEM_RE    = re.compile(r"""https://gortsarq\.am/ru/(\d+)p-[^)\]\s"'""" + GT + r"""]+""")
