@@ -38,11 +38,14 @@ jobs:
           JINA_KEY: ${{ secrets.JINA_KEY }}
         run: python arenda.py
 
-      - name: Save state
+            - name: Save state
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git add -A || true
+          rm -rf __pycache__
+          git add state-arenda.json
           git commit -m "state-arenda" || echo "no changes"
-          git pull --rebase --autostash || true
-          git push || true
+          for i in 1 2 3; do
+            git pull --rebase --autostash && git push && break
+            sleep 5
+          done
