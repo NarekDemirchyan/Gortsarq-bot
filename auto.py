@@ -16,9 +16,21 @@ BASE = "https://auto.am"
 SITEMAPS = [f"{BASE}/sitemaps/offers-{i}.xml" for i in range(1, 11)]
 HDRS = {"User-Agent": "curl/8.5.0"}
 
+# для картинок — обычный браузерный заголовок, иначе сайт отдаёт заглушку
+IMG_HDRS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
+    "Accept-Language": "ru,hy;q=0.9,en;q=0.8",
+}
+
 DATE_RE = re.compile(r"<lastmod>(\d{4}-\d{2}-\d{2})")
 BLOCKED = ("just a moment", "attention required", "enable javascript",
            "checking your browser", "cloudflare")
+
+# один снимок в трёх размерах: полный (без приставки), m- и s-
+PHOTO_RE = re.compile(
+    r"https://auto\.am/static/offers/(\d+)/(?:[ms]-)?([0-9a-f]{8,})\.(webp|jpg|jpeg|png)",
+    re.I)
 
 def is_blocked(text):
     t = (text or "").strip()
@@ -97,15 +109,64 @@ def get_ids(sess):
         time.sleep(5)
     return items
 
+# ---------- фотографии ----------
+
+def photo_urls(u):
+    """Варианты одного снимка: сначала полный, потом m-, потом s-."""
+    m = PHOTO_RE.search(u or "")
+    if not m:
+        return [u]
+    base = f"https://auto.am/static/offers/{m.group(1)}/"
+    h = m.group(2).lower()
+    ext = m.group(3).lower()
+    return [f"{base}{h}.{ext}", f"{base}m-{h}.{ext}", f"{base}s-{h}.{ext}"]
+
 def collect_photos(md, iid):
-    urls = re.findall(
-        rf"https://auto\.am/static/offers/{iid}/[ms]-[0-9a-f]+\.(?:webp|jpg|jpeg|png)",
-        md, re.I)
-    out = []
-    for u in [x for x in urls if "/m-" in x] + [x for x in urls if "/m-" not in x]:
-        if u not in out:
-            out.append(u)
+    out, seen = [], set()
+    for m in PHOTO_RE.finditer(md):
+        h = m.group(2).lower()
+        if h in seen:
+            continue
+        seen.add(h)
+        out.append(f"https://auto.am/static/offers/{m.group(1)}/{h}.{m.group(3).lower()}")
     return out[:10]
+
+def img_ok(r):
+    b = r.content or b""
+    if r.status_code != 200 or len(b) < 1500:
+        return False
+    return b.lstrip()[:1] != b"<"
+
+def bytes_from(sess, url, ref):
+    h = dict(IMG_HDRS)
+    h["Referer"] = ref or BASE + "/"
+    h["Accept"] = "image/avif,image/webp,image/jpeg,image/*,*/*;q=0.8"
+    try:
+        r = sess.get(url, headers=h, timeout=40)
+        if img_ok(r):
+            return r.content
+        print(f"  фото напрямую {r.status_code}, {len(r.content or b'')} байт")
+    except Exception as e:
+        print("  фото напрямую ошибка:", type(e).__name__)
+    return None
+
+def photo_bytes(sess, url, ref):
+    """Скачиваем сами: сначала полный размер, потом мельче. Через прокси — если напрямую не вышло."""
+    for u in photo_urls(url):
+        b = bytes_from(sess, u, ref)
+        if b:
+            return b
+        bare = u.split("://", 1)[-1]
+        for relay in (f"https://images.weserv.nl/?url={bare}",
+                      f"https://wsrv.nl/?url={bare}"):
+            try:
+                r = sess.get(relay, headers=IMG_HDRS, timeout=60)
+                if img_ok(r):
+                    return r.content
+            except Exception:
+                pass
+    print("  фото не скачалось:", url)
+    return None
 
 def field(md, name):
     m = re.search(rf"^{re.escape(name)}\s+([^\n\"]+?)(?:\s*\"|$)", md, re.M)
@@ -187,28 +248,72 @@ def make_caption(sess, d):
         lines.append("Телефон: " + d["phone"])
     return "\n\n".join(x for x in lines if x).strip()[:1024]
 
-def send(sess, d, caption):
-    photos = d["photos"]
-    if len(photos) >= 2:
-        media = [{"type": "photo", "media": photos[0], "caption": caption}]
-        for p in photos[1:10]:
+# ---------- Telegram ----------
+
+def send_url(sess, urls, caption):
+    """Запасной путь: отдаём ссылки Telegram-у, если скачать не получилось."""
+    if len(urls) >= 2:
+        media = [{"type": "photo", "media": urls[0], "caption": caption}]
+        for p in urls[1:10]:
             media.append({"type": "photo", "media": p})
         r = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendMediaGroup",
                       data={"chat_id": CHAT_ID,
                             "media": json.dumps(media, ensure_ascii=False)},
-                      timeout=60)
-        print("telegram album:", r.status_code, r.text[:200])
+                      timeout=90)
+        print("telegram album (ссылки):", r.status_code, r.text[:200])
         if r.ok:
             return True
-    if photos:
+    if urls:
         r = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendPhoto",
-                      data={"chat_id": CHAT_ID, "photo": photos[0],
-                            "caption": caption}, timeout=40)
+                      data={"chat_id": CHAT_ID, "photo": urls[0],
+                            "caption": caption}, timeout=60)
     else:
         r = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
                       data={"chat_id": CHAT_ID, "text": caption}, timeout=40)
-    print("telegram:", r.status_code, r.text[:200])
+    print("telegram (ссылки):", r.status_code, r.text[:200])
     return r.ok
+
+def send(sess, d, caption):
+    """Скачиваем снимки сами и отправляем файлом — так качество полное."""
+    blobs = []
+    for u in d["photos"][:10]:
+        b = photo_bytes(sess, u, d["url"])
+        if b:
+            blobs.append(b)
+
+    if blobs:
+        if len(blobs) >= 2:
+            files = {f"p{i}": (f"p{i}.jpg", b) for i, b in enumerate(blobs)}
+            media = [{"type": "photo", "media": "attach://p0", "caption": caption}]
+            for i in range(1, len(blobs)):
+                media.append({"type": "photo", "media": f"attach://p{i}"})
+            r = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendMediaGroup",
+                          data={"chat_id": CHAT_ID,
+                                "media": json.dumps(media, ensure_ascii=False)},
+                          files=files, timeout=180)
+            print("telegram album:", r.status_code, r.text[:200])
+            if r.ok:
+                return True
+            print("  альбом не прошёл, пробуем одним снимком")
+        r = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendPhoto",
+                      data={"chat_id": CHAT_ID, "caption": caption},
+                      files={"photo": ("p.jpg", blobs[0])}, timeout=120)
+        print("telegram фото:", r.status_code, r.text[:200])
+        if r.ok:
+            return True
+        r = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendDocument",
+                      data={"chat_id": CHAT_ID, "caption": caption},
+                      files={"document": ("p.jpg", blobs[0])}, timeout=120)
+        print("telegram файлом:", r.status_code, r.text[:200])
+        return bool(r.ok)
+
+    print("  снимки не скачались, пробуем ссылками")
+    cand = [photo_urls(u) for u in d["photos"][:10]]
+    for variant in (0, 1):
+        urls = [c[variant] for c in cand if len(c) > variant]
+        if urls and send_url(sess, urls, caption):
+            return True
+    return send_url(sess, [], caption)
 
 def load():
     if os.path.exists(STATE):
