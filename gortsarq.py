@@ -645,9 +645,6 @@ def main():
     print("свежих за 60 дней:", len(fresh), "| очередь:", len(st["queue"]))
     save(st)
 
-    # 3. Խառնում ենք, որ բաժինները հերթով գնան
-    random.shuffle(st["queue"])
-
     # 4. Եթե այս գործարկումում դեռ ոչինչ դուրս չի եկել՝ փորձում ենք նորից
     if done < limit and st["queue"]:
         done += publish_phase(sess, st, time.time(), limit - done)
