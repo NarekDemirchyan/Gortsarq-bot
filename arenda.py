@@ -681,8 +681,6 @@ def main():
     print("հերթում:", len(st["queue"]))
     save(st)
 
-    random.shuffle(st["queue"])
-
     if done == 0 and st["queue"]:
         done += publish_phase(sess, st, time.time(), 1)
 
