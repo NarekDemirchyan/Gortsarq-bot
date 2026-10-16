@@ -558,7 +558,6 @@ def publish_phase(sess, st, now, limit=1):
     gone = len(st["queue"]) - len(keep)
     if gone:
         print("հերթից դուրս եկան հինները:", gone)
-    keep.sort(key=lambda e: _date_key(e.get("date")), reverse=True)
     st["queue"] = keep
     done, tried = 0, 0
     while st["queue"] and done < limit and tried < MAX_TRIES:
