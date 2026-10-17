@@ -381,7 +381,7 @@ def send(sess, d, caption):
 
     markup = {"inline_keyboard": [
         [{"text": "Связаться", "url": d["url"]}],
-        [{"text": "Поддержать группу", "url": GROUP_BOOST}],
+        [{"text": "☺️Поддержать группу", "url": GROUP_BOOST}],
     ]}
 
     if not blobs:
