@@ -50,6 +50,7 @@ RESET_ONCE  = False
 TEST        = False
 
 BASE = "https://gortsarq.am"
+GROUP_BOOST = "https://t.me/boost/erevan03_baraxolka"
 
 HDRS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -378,7 +379,10 @@ def send(sess, d, caption):
         if b:
             blobs.append(b)
 
-    markup = {"inline_keyboard": [[{"text": "Связаться", "url": d["url"]}]]}
+    markup = {"inline_keyboard": [
+        [{"text": "Связаться", "url": d["url"]}],
+        [{"text": "Поддержать группу", "url": GROUP_BOOST}],
+    ]}
 
     if not blobs:
         print("  նկար չկա, ուղարկում ենք տեքստով")
