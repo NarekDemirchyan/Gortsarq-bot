@@ -3,15 +3,15 @@
 gortsarq.am -> Telegram («Բարախոլկա Երևան»). Աղբյուրը՝ միայն գործարք կայքը։
 
 Մեկ գործարկում.
- 1. Հրապարակում ենք հերթից. նկարով, իսկ նկար չլինելու դեպքում՝ տեքստով։
- 2. Հավաքում ենք վերջին 60 օրվա հայտարարությունները ու դնում հերթ։
- 3. Հերթից ոչինչ դուրս չի գցվում մինչև հրապարակվելը։
+ 1. Հրապարակում ենք հերթի գլխից՝ FIFO. գլխից ոչինչ չի հանվում առանց հրապարակվելու
+    (երեք բացառությամբ՝ չընթերցվող քարտ, անտեքստ հայտարարություն, առաստեղ)։
+ 2. Հավաքում ենք վերջին 60 օրվա հայտարարությունները ու դնում հերթի պոչ։
+ 3. Կայքը չբացվելիս գործարկումը ոչինչ չի փոխում՝ ոչ հրապարակում, ոչ դուրսգրում։
 """
 import os
 import re
 import json
 import time
-import random
 import urllib.parse
 
 import requests
@@ -41,11 +41,7 @@ MAX_SECONDS = 1500
 MAX_PAGES   = 40
 MAX_TRIES   = 4
 MAX_POSTS   = 1
-CATCHUP_AFTER = 90 * 60
-CATCHUP_POSTS = 3
 SEND_TRIES  = 3
-KEEP_DAYS   = 3650
-QUEUE_KEEP  = 8000
 RESET_ONCE  = False
 TEST        = False
 
@@ -157,6 +153,10 @@ def fetch(sess, url):
     _FAILS[0] += 1
     print("  չկարդացվեց:", url)
     return ""
+
+def site_up(sess):
+    """Կայքը շարունակու՞մ է բացվել. տարբերում ենք քարտի խնդիրը կայքի խափանումից։"""
+    return bool(fetch(sess, BASE + "/ru/"))
 
 # ---------- նկարներ ----------
 
@@ -428,8 +428,7 @@ def load():
             return json.load(open(STATE, encoding="utf-8"))
         except Exception as e:
             print("state-gortsarq.json не читается:", e)
-    return {"queue": [], "last_publish": 0, "published": {}, "failed": {},
-            "failed_date": {}, "skipped": {}}
+    return {"queue": [], "last_publish": 0, "published": {}, "skipped": {}, "seen": {}}
 
 def save(st):
     json.dump(st, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
@@ -480,36 +479,10 @@ def norm_published(st):
         if isinstance(v, (int, float)):
             pub[k] = time.strftime("%d.%m.%Y", time.gmtime(v + 4 * 3600))
     st["published"] = pub
-
-def mark_failed(st, path, date):
-    """Считаем неудачу и запоминаем, на какой версии объявления она случилась."""
-    st["failed"][path] = st["failed"].get(path, 0) + 1
-    st.setdefault("failed_date", {})[path] = date or ""
-    return st["failed"][path]
-
-def is_stuck(st, path, date):
-    """Дважды не ушло на этой же версии — больше не пробуем."""
-    if st["failed"].get(path, 0) < 2:
-        return False
-    return st.get("failed_date", {}).get(path, "") == (date or "")
-
-def drop_stuck_queue(st):
-    """Убираем из очереди всё, что уже дважды не ушло: иначе оно съедает слот."""
-    st.setdefault("failed_date", {})
-    keep, dropped = [], 0
-    for e in st["queue"]:
-        if st["failed"].get(e["path"], 0) >= 2:
-            st["failed_date"].setdefault(e["path"], e.get("date") or "")
-            dropped += 1
-            continue
-        keep.append(e)
-    if dropped:
-        print("очередь: убрано застрявших", dropped)
-    st["queue"] = keep
 # ---------- публикация ----------
 
 def publish_one(sess, st, e, now):
-    """Одна попытка публикации. 'ok' | 'skip' | 'drop' | 'fail'."""
+    """Մեկ փորձ։ 'ok' | 'skip' | 'drop' | 'dropcard' | 'hold' | 'fail'."""
     path = e["path"]
     iid = e.get("id") or ""
     if st["published"].get(path) == e.get("date"):
@@ -522,47 +495,35 @@ def publish_one(sess, st, e, now):
         print("ошибка разбора:", ex)
 
     if not d:
-        print("  էջը չի բացվում — փորձում ենք հերթում պահված տվյալներով:", iid)
-        photos = [e["photo"]] if e.get("photo") else []
-        d = {"title": "", "price": e.get("price", ""), "desc": "",
-             "place": e.get("place", ""), "photos": photos, "url": BASE + path}
-    else:
-        if not d.get("price") and e.get("price"):
-            d["price"] = e["price"]
-        if not d.get("photos") and e.get("photo"):
-            d["photos"] = [e["photo"]]
+        if not site_up(sess):
+            print("  կայքը չի բացվում. հայտարարությունը մնում է հերթի գլխում:", iid)
+            return "hold"
+        print("  քարտը չի ընթերցվում, դուրս ենք գցում ընդմիշտ:", iid)
+        st["seen"][path] = True
+        return "dropcard"
+
+    if not d.get("price") and e.get("price"):
+        d["price"] = e["price"]
+    if not d.get("photos") and e.get("photo"):
+        d["photos"] = [e["photo"]]
 
     cap = make_caption(sess, d)
     if not cap:
         print("  դատարկ հայտարարություն, դուրս ենք գցում հերթից:", iid)
+        st["seen"][path] = True
         st["skipped"][path] = e.get("date") or today_str()
         return "drop"
 
     if send(sess, d, cap):
         st["last_publish"] = now
         st["published"][path] = e.get("date") or today_str()
-        st["failed"].pop(path, None)
-        st.setdefault("failed_date", {}).pop(path, None)
         led_add(SITE, iid, now)
         print(f"опубликовано: {iid} ({path}) фото {len(d.get('photos') or [])}")
         return "ok"
     return "fail"
 
-def _date_key(d):
-    try:
-        dd, mm, yy = str(d or "").split(".")
-        return (int(yy), int(mm), int(dd))
-    except Exception:
-        return (0, 0, 0)
-
 def publish_phase(sess, st, now, limit=1):
-    """Հրապարակում ենք ամենանորը սկզբում։ Չորսից ավելի չենք փորձում։"""
-    ok_dates = last_days(KEEP_DAYS)
-    keep = [e for e in st["queue"] if e.get("date") in ok_dates]
-    gone = len(st["queue"]) - len(keep)
-    if gone:
-        print("հերթից դուրս եկան հինները:", gone)
-    st["queue"] = keep
+    """Հրապարակում ենք հերթի գլխից՝ FIFO։ Գլխից ոչինչ չի հանվում առանց հրապարակվելու։"""
     done, tried = 0, 0
     while st["queue"] and done < limit and tried < MAX_TRIES:
         e = st["queue"].pop(0)
@@ -574,33 +535,29 @@ def publish_phase(sess, st, now, limit=1):
         if res == "ok":
             done += 1
             save(st)
+        elif res in ("drop", "dropcard"):
+            continue
+        elif res == "hold":
+            st["queue"].insert(0, e)
+            break
         elif res == "fail":
-            n = mark_failed(st, path, e.get("date"))
-            if n < 2:
-                st["queue"].append(e)
-    while len(st["queue"]) > QUEUE_KEEP:
-        st["queue"].pop()
+            st["queue"].insert(0, e)
+            break
     return done
 
 def main():
     st = load()
-    st.setdefault("failed", {})
     st.setdefault("published", {})
     st.setdefault("skipped", {})
+    st.setdefault("seen", {})
     st.setdefault("last_publish", 0)
-    st.setdefault("failed_date", {})
     norm_queue(st)
     norm_published(st)
-    drop_stuck_queue(st)
     sess = requests.Session()
     now = time.time()
     deadline = now + MAX_SECONDS
 
-    # խումբը երկար լուռ է եղել՝ այս գործարկումը դուրս է բերում մի քանի գրառում
-    gap = now - st["last_publish"]
-    limit = CATCHUP_POSTS if gap >= CATCHUP_AFTER else MAX_POSTS
-    if limit != MAX_POSTS:
-        print(f"догоняем: группа молчит {int(gap / 60)} мин, до {limit} постов")
+    limit = MAX_POSTS
 
     # 1. Հրապարակում ենք հավաքված հերթից
     done = publish_phase(sess, st, now, limit)
@@ -625,11 +582,8 @@ def main():
             it["date"] = today_str()
         if it["date"] not in ok_dates:
             continue
-        if is_stuck(st, it["path"], it["date"]):
+        if it["path"] in st["seen"]:
             continue
-        if st["failed"].get(it["path"]) and \
-                st.get("failed_date", {}).get(it["path"]) != it["date"]:
-            st["failed"].pop(it["path"], None)
         if st["published"].get(it["path"]) == it["date"]:
             continue
         if st["skipped"].get(it["path"]) == it["date"]:
@@ -644,7 +598,9 @@ def main():
         st["queue"].extend(fresh)
         print("новых в очередь:", len(fresh))
     while len(st["queue"]) > QUEUE_MAX:
-        st["queue"].pop(0)
+        gone = st["queue"].pop(0)
+        st["seen"][gone["path"]] = True
+        print("առաստեղ. գլխից դուրս եկավ:", gone["path"])
     print("свежих за 60 дней:", len(fresh), "| очередь:", len(st["queue"]))
     save(st)
 
@@ -687,7 +643,7 @@ try:
     _st = load()
     if not _st.get("reset60"):
         _st.update({"queue": [], "published": {}, "skipped": {}, "failed": {},
-                    "failed_date": {}, "pub_day": {}, "nicks": {}, "seen": [],
+                    "failed_date": {}, "pub_day": {}, "nicks": {}, "seen": {},
                     "reset60": True})
         save(_st)
         print("очистка: очередь и отметки сброшены, собираем 60 дней заново")
