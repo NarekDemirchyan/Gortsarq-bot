@@ -549,7 +549,8 @@ def main():
     st = load()
     st.setdefault("published", {})
     st.setdefault("skipped", {})
-    st.setdefault("seen", {})
+    if not isinstance(st.get("seen"), dict):
+        st["seen"] = {}
     st.setdefault("last_publish", 0)
     norm_queue(st)
     norm_published(st)
@@ -615,6 +616,10 @@ def main():
     if len(st["skipped"]) > 20000:
         keys = list(st["skipped"])[-8000:]
         st["skipped"] = {k: st["skipped"][k] for k in keys}
+
+    if len(st["seen"]) > 50000:
+        for k in list(st["seen"])[:20000]:
+            st["seen"].pop(k, None)
 
     save(st)
     n_today = led_today()
