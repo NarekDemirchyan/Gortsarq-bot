@@ -20,6 +20,8 @@ MIN_JF    = 12
 STEP      = 8
 TRIES_MAX = 3
 
+BULLET = "🔺"
+
 HDRS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
@@ -63,6 +65,7 @@ STOP_WORDS = ("Ընկերության մասին", "Տարածեք հայտար�
 FORM = ("Անուն Ազգանուն", "Էլ. հասցե", "Նշեք գործող", "Լրացրեք դաշտերը",
         "Ուղարկել", "Կցել", "Ընտրեք ֆայլ", "Գրանցվել", "Ձեր անունը",
         "Հեռախոս *", "Ծածկագիր", "Դիմել այս")
+SENT_END = (".", ":", "!", "?", "։", "»", ";", "…")
 
 def get(sess, url):
     for _ in range(2):
@@ -177,6 +180,15 @@ def tags_of(ind, n=3):
 def cat_of(ind):
     return clean(re.split(r"[,;/]", ind)[0]) if ind else "այլ"
 
+def join_ok(prev):
+    return bool(prev) and not prev.rstrip().endswith(SENT_END)
+
+def add_item(cur, item):
+    if item[0].islower() and cur[1] and join_ok(cur[1][-1]):
+        cur[1][-1] = (cur[1][-1] + " " + item)[:400]
+    elif len(item) > 3:
+        cur[1].append(item[:400])
+
 def make_caption(d):
     L = ["<b>%s</b>" % esc(d["title"])]
     if d["company"]:
@@ -191,7 +203,7 @@ def make_caption(d):
         L.append("")
         L.append("🔹 <b>%s</b>" % esc(head))
         for it in items:
-            L.append("— %s" % esc(it))
+            L.append("%s %s" % (BULLET, esc(it)))
     L.append("")
     if d["deadline"]:
         L.append("⏳ Վերջնաժամկետ՝ %s" % d["deadline"])
@@ -235,7 +247,7 @@ def parse_am(html_text, path):
             continue
         if any(f in low for f in FORM):
             break
-        bare = low.lstrip("—–-•· ")
+        bare = low.lstrip("—–-•·🔺 ")
         key = next((h for h in HEADS if bare.startswith(h)), None) \
               or next((k for k in HEAD_ALIASES if bare.startswith(k)), None)
         hit = HEAD_ALIASES.get(key, key) if key else None
@@ -250,13 +262,10 @@ def parse_am(html_text, path):
             if rest and rest not in ("՝", ":"):
                 cur[1].append(rest)
         elif cur is not None:
-            item = clean(low.lstrip("—-•·–"))
+            item = clean(low.lstrip("—-•·–🔺"))
             if not item or item in STOP_LINES:
                 continue
-            if item[0].islower() and cur[1]:
-                cur[1][-1] = (cur[1][-1] + " " + item)[:400]
-            elif len(item) > 3:
-                cur[1].append(item[:400])
+            add_item(cur, item)
 
     limits = {"Նկարագրություն": 4, "Պարտականություններ": 12, "Պահանջներ": 12,
               "Առավելություններ": 10, "Նպաստավորություններ": 10,
@@ -274,7 +283,7 @@ def parse_am(html_text, path):
     if not clean_sections:
         plain = []
         for line in body.split("\n")[1:]:
-            low = clean(line.lstrip("—-•·–"))
+            low = clean(line.lstrip("—-•·–🔺"))
             if any(f in low for f in FORM):
                 break
             if len(low) > 25 and ARM.search(low) and low not in plain:
@@ -340,13 +349,10 @@ def parse_jf(html_text, pid):
             continue
         if not started or cur is None:
             continue
-        it = clean(low.lstrip("-–•— "))
+        it = clean(low.lstrip("-–•—🔺 "))
         if not it or not ARM.search(it) or len(it) < 3:
             continue
-        if it[0].islower() and cur[1]:
-            cur[1][-1] = (cur[1][-1] + " " + it)[:400]
-        else:
-            cur[1].append(it[:400])
+        add_item(cur, it)
 
     limits = {"Նկարագրություն": 4, "Պարտականություններ": 12,
               "Պահանջներ": 12, "Հավելյալ նշումներ": 8}
