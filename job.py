@@ -15,7 +15,7 @@ BASE2   = "https://jobfinder.am"
 
 DAYS    = 30
 QUEUE_MAX = 200
-REFILL_AT = 50
+REFILL_AT = 190
 STEP      = 8
 TRIES_MAX = 3
 
