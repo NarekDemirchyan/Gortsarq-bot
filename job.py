@@ -142,14 +142,22 @@ def parse(html_text, path):
         hit = next((h for h in HEADS if low.startswith(h)), None)
         if hit:
             name = "Աշխատավայրեր" if hit == "Աշխատավայրերը" else hit
-            cur = [name, []]
-            sections.append(cur)
+            same = next((s for s in sections if s[0] == name), None)
+            if same is not None:
+                cur = same
+            else:
+                cur = [name, []]
+                sections.append(cur)
             rest = clean(low[len(hit):])
             if rest and rest not in ("՝", ":"):
                 cur[1].append(rest)
         elif cur is not None:
             item = clean(low.lstrip("—-•·–"))
-            if item and len(item) > 1 and item not in STOP_LINES:
+            if not item or item in STOP_LINES:
+                continue
+            if item[0].islower() and cur[1]:
+                cur[1][-1] = (cur[1][-1] + " " + item)[:400]
+            elif len(item) > 3:
                 cur[1].append(item[:400])
 
     limits = {"Նկարագրություն": 4, "Պարտականություններ": 12, "Պահանջներ": 12,
