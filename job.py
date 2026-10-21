@@ -34,8 +34,10 @@ HEADS = ["Նկարագրություն", "Պարտականություններ",
          "Առավելություններ", "Նպաստավորություններ", "Հավելյալ նշումներ",
          "Աշխատավայրերը"]
 STOP_LINES = ("Ամբողջությամբ կարդալ", "Տեսնել ավելին", "Դիմել", "Կարդալ ավելին")
-STOP_WORDS = ("Ընկերության մասին", "Ուղեկցող նամակ", "Դիմել",
-              "Տարածեք հայտարարությունը", "Հայտարարությանը դիմելու")
+STOP_WORDS = ("Ընկերության մասին", "Տարածեք հայտարարությունը")
+FORM = ("Անուն Ազգանուն", "Էլ. հասցե", "Նշեք գործող", "Լրացրեք դաշտերը",
+        "Ուղարկել", "Կցել", "Ընտրեք ֆայլ", "Գրանցվել", "Ձեր անունը",
+        "Հեռախոս *", "Ծածկագիր", "Դիմել այս")
 
 def get(sess, url):
     try:
@@ -129,11 +131,13 @@ def parse(html_text, path):
             body_end = k
     body = t[stop:body_end]
 
-    sections, cur = [], None
+    sections, cur, form = [], None, False
     for line in body.split("\n"):
         low = clean(line)
         if not low or low in STOP_LINES:
             continue
+        if any(f in low for f in FORM):
+            break
         hit = next((h for h in HEADS if low.startswith(h)), None)
         if hit:
             name = "Աշխատավայրեր" if hit == "Աշխատավայրերը" else hit
@@ -147,7 +151,7 @@ def parse(html_text, path):
             if item and len(item) > 1 and item not in STOP_LINES:
                 cur[1].append(item[:400])
 
-    limits = {"Նկարագրություն": 3, "Պարտականություններ": 12, "Պահանջներ": 12,
+    limits = {"Նկարագրություն": 4, "Պարտականություններ": 12, "Պահանջներ": 12,
               "Առավելություններ": 10, "Նպաստավորություններ": 10,
               "Հավելյալ նշումներ": 8, "Աշխատավայրեր": 4}
     clean_sections = []
@@ -160,12 +164,26 @@ def parse(html_text, path):
         if uniq:
             clean_sections.append((head, uniq))
 
+    # պահուստ. եթե բաժիններ չկան, վերցնում ենք առաջին պարբերությունները
+    if not clean_sections:
+        plain = []
+        for line in body.split("\n")[1:]:
+            low = clean(line.lstrip("—-•·–"))
+            if any(f in low for f in FORM):
+                break
+            if len(low) > 25 and ARM.search(low) and low not in plain:
+                plain.append(low[:400])
+            if len(plain) >= 4:
+                break
+        if plain:
+            clean_sections = [("Նկարագրություն", plain)]
+
     salary = re.sub(r"^Ամսական\s*", "", field(block, "Աշխատավարձ"))
 
     dl = ""
-    m = re.search(r"Վերջնաժամկետ[^\n]{0,40}", t)
+    m = re.search(r"Վերջնաժամկետ", t)
     if m:
-        d = DATE_RE.search(m.group(0))
+        d = DATE_RE.search(t[m.end():m.end() + 80])
         if d:
             dl = "%s.%s.%s" % (d.group(1), d.group(2), d.group(3))
 
@@ -373,7 +391,8 @@ def main():
             d = parse(h, path)
             print("-" * 40)
             print("հեռախոս՝", d["phones"], "| լեզու՝", d["hy"],
-                  "| ժամկետ՝", d["deadline"], "| բաժին՝", d["cat"])
+                  "| ժամկետ՝", d["deadline"], "| բաժին՝", d["cat"],
+                  "| բաժիններ՝", [x[0] for x in d["sections"]])
             print(make_caption(d))
         return
 
