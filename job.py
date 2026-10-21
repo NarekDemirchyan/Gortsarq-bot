@@ -13,12 +13,15 @@ SITEMAP = "https://job.am/sitemap/jobs.xml"
 DAYS    = 30
 QUEUE_MAX = 200
 REFILL_AT = 50
-TRIES_MAX = 12
+TRIES_MAX = 3
 
 HDRS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
     "Accept-Language": "hy,ru;q=0.9,en;q=0.8",
+    "Accept": ("text/html,application/xhtml+xml,application/xml;q=0.9,"
+               "image/avif,image/webp,*/*;q=0.8"),
+    "Referer": "https://job.am/hy/",
 }
 
 ARM = re.compile(r"[\u0531-\u0587]")
@@ -26,6 +29,7 @@ LAT = re.compile(r"[A-Za-z]")
 SITE_RE = re.compile(r"<loc>\s*(https?://job\.am/hy/job/[^<\s]+?)\s*</loc>"
                      r"\s*<lastmod>\s*(\d{4}-\d{2}-\d{2})", re.I)
 DATE_RE = re.compile(r"(\d{2})\.(\d{2})\.(\d{4})")
+DAYNUM_RE = re.compile(r"^\d{1,2}[\.\-/]")
 PHONE_RE = re.compile(r"(?:\+?374|\b0)[\s\-\(\)0-9]{7,18}")
 TEL_RE = re.compile(r"""tel:([+\d][\d\s\-\(\)]{6,20})""", re.I)
 
@@ -92,6 +96,8 @@ def field(block, label):
         if not line:
             continue
         if any(line.startswith(x) for x in FIELDS) or line.startswith("Հեռ"):
+            break
+        if DATE_RE.search(line) or DAYNUM_RE.match(line):
             break
         vals.append(line)
         if len(vals) >= 2:
@@ -276,7 +282,6 @@ def make_caption(d):
     return "\n".join(L).strip()[:4000]
 
 def listing(sess):
-    """Все вакансии из sitemap за последние DAYS дней, новые первыми."""
     h = get(sess, SITEMAP)
     if not h:
         return []
@@ -324,35 +329,33 @@ def publish(sess, st):
     while st["queue"] and tried < TRIES_MAX:
         item = st["queue"][0]
         tried += 1
-        h = get(sess, BASE + item["path"])
-        if not h:
-            print("  էջը չբացվեց, տեղափոխում ենք հերթի վերջ")
-            st["queue"].append(st["queue"].pop(0))
+        text = item.get("text") or ""
+
+        if not text:
+            h = get(sess, BASE + item["path"])
+            if not h:
+                print("  տեքստ դեռ չկա, հերթը մնում է նույնը")
+                return False
+            d = parse(h, item["path"])
+            if expired(d["deadline"]) or not d["phones"] or not d["hy"]:
+                print("  բաց թողնված՝", item["id"])
+                st["seen"][item["id"]] = 1
+                st["queue"].pop(0)
+                save(st)
+                continue
+            text = make_caption(d)
+            item["text"] = text
             save(st)
-            continue
-        d = parse(h, item["path"])
-        bad = []
-        if d["id"] in st["published"]:
-            bad.append("կրկնություն")
-        if expired(d["deadline"]):
-            bad.append("ժամկետ")
-        if not d["phones"]:
-            bad.append("հեռախոս")
-        if not d["hy"]:
-            bad.append("լեզու")
-        if bad:
-            print("  բաց թողնված՝", d["id"], ",".join(bad))
-            st["seen"][d["id"]] = 1
+
+        if send(sess, text):
+            st["published"][item["id"]] = 1
             st["queue"].pop(0)
             save(st)
-            continue
-        if send(sess, make_caption(d)):
-            st["published"][d["id"]] = 1
-            st["queue"].pop(0)
-            save(st)
-            print("հրապարակված՝", d["id"], d["title"])
+            print("հրապարակված՝", item["id"])
             return True
+        print("  չուղարկվեց, մնում է հերթում")
         return False
+
     print("ուշադրություն՝ ոչինչ չհրապարակվեց,", tried, "փորձից հետո | հերթ:", len(st["queue"]))
     return False
 
@@ -377,7 +380,8 @@ def collect(sess, st):
         if cat not in groups:
             groups[cat] = []
             order.append(cat)
-        groups[cat].append({"path": path, "id": d["id"], "cat": cat})
+        groups[cat].append({"path": path, "id": d["id"], "cat": cat,
+                            "text": make_caption(d)})
         if sum(len(v) for v in groups.values()) >= QUEUE_MAX:
             break
 
@@ -387,7 +391,7 @@ def collect(sess, st):
             if groups[cat]:
                 mix.append(groups[cat].pop(0))
 
-    tail_cat = st["queue"][-1]["cat"] if st["queue"] else ""
+    tail_cat = st["queue"][-1].get("cat", "") if st["queue"] else ""
     if tail_cat and len(mix) > 1 and mix[0]["cat"] == tail_cat:
         swap = next((i for i, x in enumerate(mix) if x["cat"] != tail_cat), 0)
         mix[0], mix[swap] = mix[swap], mix[0]
@@ -407,8 +411,7 @@ def main():
     mode = sys.argv[1].strip().lower() if len(sys.argv) > 1 else ""
 
     if mode == "test":
-        paths = listing(sess)[:3]
-        for path in paths:
+        for path in listing(sess)[:3]:
             h = get(sess, BASE + path)
             if not h:
                 continue
