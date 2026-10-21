@@ -1,27 +1,18 @@
 # -*- coding: utf-8 -*-
 """
 Этот файл бот загружает первым (см. bot.yml), до остальной работы.
-Три задачи.
 
-1. Ключ Jina. Если секрет JINA_KEY есть, он подставляется в каждый запрос
-   к r.jina.ai. Без ключа читалка тоже работает, но часто отвечает пустой
-   страницей — тогда в дело идёт браузер (пункт 3).
-
-2. Повтор чтения. gortsarq.am то пускает читалку, то закрывает её защитой.
-   Если ответ слабый — ошибка, проверка защиты или почти пустой текст —
-   запрос повторяется, а последняя неудача больше не поднимает исключение
-   наружу: страница уходит в браузер. Раньше четвёртый запрос падал
-   с ReadTimeout и рушил чтение всей категории.
-
-3. Браузер. chromium из playwright (уже ставится в bot.yml) открывает
-   страницу по-настоящему, проходит проверку «Checking your browser»
-   и отдаёт HTML, который fetcher переводит в тот же markdown.
-   Браузер бесплатный и без квоты, поэтому когда он один раз сработал,
-   дальше он идёт первым, без ожидания читалки.
-
-Всё обёрнуто в try: не вышло — запрос уходит как есть.
+1. Ключ Jina: если секрет JINA_KEY есть, он подставляется в запросы
+   к r.jina.ai.
+2. Повтор чтения: слабый ответ повторяется, а последняя неудача больше
+   не поднимает исключение наружу — страница уходит в браузер.
+3. Браузер: chromium из playwright проходит проверку «Checking your
+   browser». Открывается один раз на весь запуск и переиспользуется.
+   Картинки ждём только на странице объявления: в списке категорий их
+   нет, и ожидание съедало по 15 секунд на каждую страницу.
 """
 import os
+import re
 import time
 
 try:
@@ -36,9 +27,11 @@ BLOCK_WORDS = ("security verification", "just a moment", "cf-chl",
                "attention required", "captcha", "проверка безопасности",
                "checking your browser", "enable javascript")
 TRIES = 3
-IMG_RE = r"\.(png|jpe?g|gif|webp|svg|woff2?|ttf|otf)(\?|$)"
+PAGE_RE = re.compile(r"/\d+p-")
 
 _BROWSER_OK = False
+_PW = None
+_BRW = None
 
 class Read:
     """Ответ читалки: то же, что requests.Response, но собранный вручную."""
@@ -52,6 +45,21 @@ class Read:
     def json(self):
         import json
         return json.loads(self.text or "{}")
+
+def _reset():
+    global _PW, _BRW
+    try:
+        if _BRW:
+            _BRW.close()
+    except Exception:
+        pass
+    try:
+        if _PW:
+            _PW.stop()
+    except Exception:
+        pass
+    _BRW = None
+    _PW = None
 
 def _with_key(url, headers):
     if not KEY or not str(url).startswith(JINA):
@@ -76,34 +84,44 @@ def _weak(r):
 
 def _browser(url):
     """Настоящий браузер: проходит проверку и отдаёт страницу в markdown.
-    Картинки не глушим — галерея объявления появляется только после их
-    загрузки. Ждём до шести кругов, пока в тексте не будет хотя бы одной
-    картинки, иначе снимок делается раньше галереи и фото теряются."""
+    Браузер открывается один раз на весь запуск и переиспользуется —
+    раньше поднимался и закрывался на каждой странице.
+    Картинки ждём только на объявлении: в списке их нет, а ожидание там
+    съедало по 15 секунд на каждую страницу."""
+    global _BRW, _PW
     try:
-        from playwright.sync_api import sync_playwright
         import fetcher
     except Exception as e:
         print(" браузер недоступен:", type(e).__name__)
         return ""
 
-    h, md = "", ""
+    need_img = bool(PAGE_RE.search(url or ""))
+    h, md, pg = "", "", None
     try:
-        with sync_playwright() as p:
-            b = p.chromium.launch(args=["--no-sandbox"])
-            pg = b.new_page(user_agent=fetcher.UA, locale="ru-RU")
-            pg.goto(url, timeout=60000, wait_until="domcontentloaded")
-            for _ in range(6):
-                pg.wait_for_timeout(4000)
-                h = pg.content()
-                if len(h) < 5000 or any(w in h[:4000].lower() for w in BLOCK_WORDS):
-                    continue
-                md = fetcher.to_md(h, url)
-                if "![" in md:
-                    break
-            b.close()
+        if _BRW is None:
+            from playwright.sync_api import sync_playwright
+            _PW = sync_playwright().start()
+            _BRW = _PW.chromium.launch(args=["--no-sandbox"])
+        pg = _BRW.new_page(user_agent=fetcher.UA, locale="ru-RU")
+        pg.goto(url, timeout=45000, wait_until="domcontentloaded")
+        for _ in range(5 if need_img else 2):
+            pg.wait_for_timeout(2500)
+            h = pg.content()
+            if len(h) < 5000 or any(w in h[:4000].lower() for w in BLOCK_WORDS):
+                continue
+            md = fetcher.to_md(h, url)
+            if not need_img or "![" in md:
+                break
     except Exception as e:
         print(" браузер: сбой", type(e).__name__)
-        return ""
+        md = ""
+        _reset()
+    finally:
+        try:
+            if pg:
+                pg.close()
+        except Exception:
+            pass
 
     if not md and h:
         md = fetcher.to_md(h, url)
