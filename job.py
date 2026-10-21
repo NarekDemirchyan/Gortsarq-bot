@@ -34,6 +34,14 @@ FIELDS = ["Աշխատավայր", "Աշխատավարձ", "Դրույք", "Աշ�
 HEADS = ["Նկարագրություն", "Պարտականություններ", "Պահանջներ",
          "Առավելություններ", "Նպաստավորություններ", "Հավելյալ նշումներ",
          "Աշխատավայրերը"]
+HEAD_ALIASES = {
+    "Հիմնական պարտականություններ": "Պարտականություններ",
+    "Աշխատանքային պարտականություններ": "Պարտականություններ",
+    "Գործառույթներ": "Պարտականություններ",
+    "Հիմնական պահանջներ": "Պահանջներ",
+    "Աշխատանքային պահանջներ": "Պահանջներ",
+    "Պարտադիր պահանջներ": "Պահանջներ",
+}
 STOP_LINES = ("Ամբողջությամբ կարդալ", "Տեսնել ավելին", "Դիմել", "Կարդալ ավելին")
 STOP_WORDS = ("Ընկերության մասին", "Տարածեք հայտարարությունը")
 FORM = ("Անուն Ազգանուն", "Էլ. հասցե", "Նշեք գործող", "Լրացրեք դաշտերը",
@@ -139,7 +147,10 @@ def parse(html_text, path):
             continue
         if any(f in low for f in FORM):
             break
-        hit = next((h for h in HEADS if low.startswith(h)), None)
+        bare = low.lstrip("—–-•· ")
+        key = next((h for h in HEADS if bare.startswith(h)), None) \
+              or next((k for k in HEAD_ALIASES if bare.startswith(k)), None)
+        hit = HEAD_ALIASES.get(key, key) if key else None
         if hit:
             name = "Աշխատավայրեր" if hit == "Աշխատավայրերը" else hit
             same = next((s for s in sections if s[0] == name), None)
@@ -148,7 +159,7 @@ def parse(html_text, path):
             else:
                 cur = [name, []]
                 sections.append(cur)
-            rest = clean(low[len(hit):])
+            rest = clean(bare[len(key):])
             if rest and rest not in ("՝", ":"):
                 cur[1].append(rest)
         elif cur is not None:
