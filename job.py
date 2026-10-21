@@ -15,9 +15,9 @@ BASE2   = "https://jobfinder.am"
 
 DAYS      = 30
 QUEUE_MAX = 200
-REFILL_AT = 50      # սկսում է լցնել, երբ հերթը ցածր է այս թվից
-MIN_JF    = 12      # միշտ պահում է գոնե այսքան jobfinder-ի հայտարարություն
-STEP      = 8       # մեկ գործարկումից հավաքվող էջերի քանակ
+REFILL_AT = 50
+MIN_JF    = 12
+STEP      = 8
 TRIES_MAX = 3
 
 HDRS = {
@@ -160,7 +160,11 @@ def field(block, label):
 def tags_of(ind, n=3):
     tags = []
     for part in re.split(r"[,;/]", ind or ""):
-        words = clean(part).split()
+        words = []
+        for w in clean(part).split():
+            if words and w[:1].isupper():
+                break
+            words.append(w)
         if not words:
             continue
         tag = "#" + "_".join(words[:3])
@@ -456,8 +460,6 @@ def fill_jf(sess, st, n):
             bad = "վերնագիր չկա"
         elif not d["hy"]:
             bad = "ոչ հայերեն"
-        elif not d["phones"]:
-            bad = "հեռախոս չկա"
         elif expired(d["deadline"]):
             bad = "ժամկետը լրացել է"
         if bad:
@@ -465,8 +467,12 @@ def fill_jf(sess, st, n):
             print("  jf բաց թողնված՝", pid, "|", bad)
             continue
 
+        text = make_caption(d)
+        if not d["phones"]:
+            text += "\n🔗 Դիմելու համար՝ https://jobfinder.am/jobs/x/%s" % pid
+
         out.append({"path": "/jobs/x/" + pid, "id": pid, "cat": d["cat"], "site": "jf",
-                    "text": make_caption(d)})
+                    "text": text})
         time.sleep(1)
     save(st)
     return out
@@ -519,12 +525,14 @@ def publish(sess, st):
                 print("  տեքստ դեռ չկա, հերթը մնում է նույնը")
                 return False
             d = parse_jf(h, item["id"]) if item.get("site") == "jf" else parse_am(h, item["path"])
-            if expired(d["deadline"]) or not d["phones"] or not d["hy"]:
+            if expired(d["deadline"]) or not d["hy"] or not d["title"]:
                 st["seen"][item["id"]] = 1
                 st["queue"].pop(idx)
                 save(st)
                 continue
             text = make_caption(d)
+            if not d["phones"]:
+                text += "\n🔗 Դիմելու համար՝ https://jobfinder.am/jobs/x/%s" % item["id"]
             item["text"] = text
             save(st)
 
