@@ -13,7 +13,7 @@ SITEMAP = "https://job.am/sitemap/jobs.xml"
 DAYS    = 30
 QUEUE_MAX = 200
 REFILL_AT = 50
-TRIES_MAX = 5
+TRIES_MAX = 12
 
 HDRS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -49,13 +49,15 @@ FORM = ("Անուն Ազգանուն", "Էլ. հասցե", "Նշեք գործո�
         "Հեռախոս *", "Ծածկագիր", "Դիմել այս")
 
 def get(sess, url):
-    try:
-        r = sess.get(url, headers=HDRS, timeout=30)
-        if r.status_code == 200 and len(r.text) > 2000:
-            return r.text
-        print("  պատասխան", r.status_code, url)
-    except Exception as e:
-        print("  ցանցի սխալ", type(e).__name__, url)
+    for _ in range(2):
+        try:
+            r = sess.get(url, headers=HDRS, timeout=45)
+            if r.status_code == 200 and len(r.text) > 2000:
+                return r.text
+            print("  պատասխան", r.status_code, url)
+            break
+        except Exception as e:
+            print("  ցանցի սխալ", type(e).__name__, url)
     return ""
 
 def text_of(h):
@@ -324,8 +326,10 @@ def publish(sess, st):
         tried += 1
         h = get(sess, BASE + item["path"])
         if not h:
-            print("  էջը չբացվեց, թողնում ենք հերթում")
-            return False
+            print("  էջը չբացվեց, տեղափոխում ենք հերթի վերջ")
+            st["queue"].append(st["queue"].pop(0))
+            save(st)
+            continue
         d = parse(h, item["path"])
         bad = []
         if d["id"] in st["published"]:
@@ -349,6 +353,7 @@ def publish(sess, st):
             print("հրապարակված՝", d["id"], d["title"])
             return True
         return False
+    print("ուշադրություն՝ ոչինչ չհրապարակվեց,", tried, "փորձից հետո | հերթ:", len(st["queue"]))
     return False
 
 def collect(sess, st):
