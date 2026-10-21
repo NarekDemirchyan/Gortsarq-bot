@@ -576,7 +576,7 @@ def collect(sess, st):
     st["turn"] = turn + 1
 
     part = fn(sess, st, STEP)
-    if not part:
+    if not part and len(st["queue"]) < REFILL_AT:
         other = fill_am if fn is fill_jf else fill_jf
         part = other(sess, st, STEP)
 
