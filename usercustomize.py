@@ -75,35 +75,38 @@ def _weak(r):
     return any(w in low for w in BLOCK_WORDS)
 
 def _browser(url):
-    """Настоящий браузер: проходит проверку и отдаёт страницу в markdown."""
+    """Настоящий браузер: проходит проверку и отдаёт страницу в markdown.
+    Картинки не глушим — галерея объявления появляется только после их
+    загрузки. Ждём до шести кругов, пока в тексте не будет хотя бы одной
+    картинки, иначе снимок делается раньше галереи и фото теряются."""
     try:
-        import re
         from playwright.sync_api import sync_playwright
         import fetcher
     except Exception as e:
         print(" браузер недоступен:", type(e).__name__)
         return ""
 
-    h = ""
+    h, md = "", ""
     try:
         with sync_playwright() as p:
             b = p.chromium.launch(args=["--no-sandbox"])
             pg = b.new_page(user_agent=fetcher.UA, locale="ru-RU")
-            pg.route(re.compile(IMG_RE), lambda r: r.abort())
             pg.goto(url, timeout=60000, wait_until="domcontentloaded")
-            for _ in range(4):
-                pg.wait_for_timeout(5000)
+            for _ in range(6):
+                pg.wait_for_timeout(4000)
                 h = pg.content()
-                if len(h) > 5000 and not any(w in h[:4000].lower() for w in BLOCK_WORDS):
+                if len(h) < 5000 or any(w in h[:4000].lower() for w in BLOCK_WORDS):
+                    continue
+                md = fetcher.to_md(h, url)
+                if "![" in md:
                     break
             b.close()
     except Exception as e:
         print(" браузер: сбой", type(e).__name__)
         return ""
 
-    if not h:
-        return ""
-    md = fetcher.to_md(h, url)
+    if not md and h:
+        md = fetcher.to_md(h, url)
     return md if len(md) > 800 else ""
 
 def _patch():
