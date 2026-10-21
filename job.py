@@ -12,6 +12,7 @@ BASE    = "https://job.am"
 SITEMAP = "https://job.am/sitemap/jobs.xml"
 DAYS    = 30
 QUEUE_MAX = 200
+REFILL_AT = 50
 TRIES_MAX = 5
 
 HDRS = {
@@ -131,7 +132,7 @@ def parse(html_text, path):
             body_end = k
     body = t[stop:body_end]
 
-    sections, cur, form = [], None, False
+    sections, cur = [], None
     for line in body.split("\n"):
         low = clean(line)
         if not low or low in STOP_LINES:
@@ -164,7 +165,6 @@ def parse(html_text, path):
         if uniq:
             clean_sections.append((head, uniq))
 
-    # պահուստ. եթե բաժիններ չկան, վերցնում ենք առաջին պարբերությունները
     if not clean_sections:
         plain = []
         for line in body.split("\n")[1:]:
@@ -334,7 +334,7 @@ def publish(sess, st):
 
 def collect(sess, st):
     groups, order = {}, []
-    for path in ([] if len(st["queue"]) >= QUEUE_MAX else listing(sess)):
+    for path in ([] if len(st["queue"]) >= REFILL_AT else listing(sess)):
         jid = path.rstrip("/").split("-")[-1]
         if jid in st["seen"] or jid in st["published"]:
             continue
