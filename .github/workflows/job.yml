@@ -7,7 +7,7 @@ on:
     inputs:
       mode:
         description: 'test — только показать разбор, ничего не публиковать'
-        default: 'test'
+        default: 'go'
 
 permissions:
   contents: write
