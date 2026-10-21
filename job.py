@@ -2,7 +2,7 @@
 """
 job.am + jobfinder.am -> Telegram «Աշխատանք Հայաստանում | Գործ կա»
 """
-import os, re, sys, json, html, time, random
+import os, re, sys, json, html, time
 import requests
 
 TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
@@ -15,7 +15,7 @@ BASE2   = "https://jobfinder.am"
 
 DAYS    = 30
 QUEUE_MAX = 200
-REFILL_AT = 190
+REFILL_AT = 190      # ժամանակավոր՝ հետո վերադարձնել 50
 STEP      = 8
 TRIES_MAX = 3
 
@@ -46,9 +46,11 @@ HEADS = ["Նկարագրություն", "Պարտականություններ",
 HEAD_ALIASES = {
     "Հիմնական պարտականություններ": "Պարտականություններ",
     "Աշխատանքային պարտականություններ": "Պարտականություններ",
+    "Աշխատանքի պարտականություններ": "Պարտականություններ",
     "Գործառույթներ": "Պարտականություններ",
     "Հիմնական պահանջներ": "Պահանջներ",
     "Աշխատանքային պահանջներ": "Պահանջներ",
+    "Աշխատանքի պահանջներ": "Պահանջներ",
     "Պարտադիր պահանջներ": "Պահանջներ",
 }
 JF_HEADS = {"Աշխատանքի նկարագրությունը": "Նկարագրություն",
@@ -94,6 +96,10 @@ def clean(s):
 
 def esc(s):
     return html.escape(s or "", quote=False)
+
+def money(s):
+    s = clean(s or "")
+    return s if re.search(r"\d", s) else ""
 
 def expired(dl):
     if not dl:
@@ -141,6 +147,19 @@ def field(block, label):
             break
     return clean(" ".join(vals))[:120]
 
+def tags_of(ind, n=3):
+    tags = []
+    for part in re.split(r"[,;]", ind or ""):
+        part = clean(part)
+        if part and len(tags) < n:
+            tag = "#" + part.replace(" ", "_")
+            if tag not in tags:
+                tags.append(tag)
+    return tags
+
+def cat_of(ind):
+    return clean(re.split(r"[,;]", ind)[0]) if ind else "այլ"
+
 def make_caption(d):
     L = ["<b>%s</b>" % esc(d["title"])]
     if d["company"]:
@@ -165,24 +184,6 @@ def make_caption(d):
         L.append("")
         L.append(" ".join(d["tags"]))
     return "\n".join(L).strip()[:4000]
-
-def tags_of(ind, n=3):
-    tags = []
-    for part in re.split(r"[,;]", ind or ""):
-        part = clean(part)
-        if part and len(tags) < n:
-            tag = "#" + part.replace(" ", "_")
-            if tag not in tags:
-                tags.append(tag)
-    return tags
-
-def cat_of(ind):
-    return clean(re.split(r"[,;]", ind)[0]) if ind else "այլ"
-
-def works(html_text, t, title, body):
-    a = len(ARM.findall(title)) * 3 + len(ARM.findall(body))
-    b = len(LAT.findall(body))
-    return a >= 30 and a >= b
 
 def parse_am(html_text, path):
     t = text_of(html_text)
@@ -275,12 +276,15 @@ def parse_am(html_text, path):
             dl = "%s.%s.%s" % (d.group(1), d.group(2), d.group(3))
 
     ind = field(block, "Ոլորտ")
+    armenian = len(ARM.findall(title)) * 3 + len(ARM.findall(body))
+    latin = len(LAT.findall(body))
+
     return {
         "id": path.rstrip("/").split("-")[-1],
         "title": title[:90],
         "company": company[:70],
         "place": field(block, "Աշխատավայր")[:70],
-        "salary": re.sub(r"^Ամսական\s*", "", field(block, "Աշխատավարձ"))[:60],
+        "salary": money(re.sub(r"^Ամսական\s*", "", field(block, "Աշխատավարձ")))[:60],
         "type": field(block, "Դրույք")[:50],
         "sched": field(block, "Աշխատանքային գրաֆիկ")[:70],
         "exp": field(block, "Աշխատանքային փորձ")[:50],
@@ -289,7 +293,7 @@ def parse_am(html_text, path):
         "phones": phones_of(html_text, t),
         "sections": clean_sections,
         "tags": tags_of(ind),
-        "hy": works(html_text, t, title, body),
+        "hy": armenian >= 30 and armenian >= latin,
         "cat": cat_of(ind),
     }
 
@@ -352,12 +356,15 @@ def parse_jf(html_text, pid):
         if uniq:
             clean_sections.append((head, uniq))
 
+    armenian = len(ARM.findall(title)) * 3 + len(ARM.findall(t))
+    latin = len(LAT.findall(t))
+
     return {
         "id": str(pid),
         "title": title[:90],
         "company": company[:70],
         "place": place[:70],
-        "salary": lab("Աշխատավարձ")[:60],
+        "salary": money(lab("Աշխատավարձ"))[:60],
         "type": lab("Աշխատանքի տեսակը")[:50],
         "sched": lab("Գրաֆիկ")[:70],
         "exp": lab("Փորձ")[:50],
@@ -366,7 +373,7 @@ def parse_jf(html_text, pid):
         "phones": phones_of(html_text, t),
         "sections": clean_sections,
         "tags": tags_of(ind),
-        "hy": works(html_text, t, title, t),
+        "hy": armenian >= 30 and armenian >= latin,
         "cat": cat_of(ind),
     }
 
@@ -475,9 +482,9 @@ def send(sess, text):
 def pick(st):
     q = st["queue"]
     last = st.get("last_site")
-    if last and q[0].get("site", "am") == last:
-        for i in range(1, min(len(q), 40)):
-            if q[i].get("site", "am") != last:
+    if last:
+        for i, it in enumerate(q):
+            if it.get("site", "am") != last:
                 return i
     return 0
 
@@ -524,7 +531,7 @@ def collect(sess, st):
     turn = st.get("turn", 0)
     part = []
     for _ in range(2):
-        fn = fill_am if turn % 2 == 0 else fill_jf
+        fn = fill_jf if turn % 2 == 0 else fill_am
         part = fn(sess, st, STEP)
         st["turn"] = turn + 1
         if part:
