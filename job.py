@@ -84,7 +84,7 @@ def text_of(h):
     h = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", h)
     h = html.unescape(h)
     h = re.sub(r"(?i)<br\s*/?>", "\n", h)
-    h = re.sub(r"(?i)</(div|p|li|h1|h2|h3|h4|tr|section)>", "\n", h)
+    h = re.sub(r"(?i)</(div|p|li|h1|h2|h3|h4|h5|tr|section)>", "\n", h)
     h = re.sub(r"(?s)<[^>]+>", " ", h)
     h = html.unescape(h).replace("\r", "")
     out = []
@@ -122,6 +122,23 @@ def deadline_of(t):
     if not d:
         return ""
     return "%02d.%02d.%s" % (int(d.group(1)), int(d.group(2)), d.group(3))
+
+def title_of(html_text, tags=("h1",)):
+    for tag in tags:
+        m = re.search(r"(?is)<%s[^>]*>(.*?)</%s>" % (tag, tag), html_text)
+        if m:
+            cand = clean(text_of(m.group(1)))
+            if cand:
+                return cand
+    m = re.search(r'(?is)<meta[^>]+property="og:title"[^>]+content="([^"]+)"', html_text)
+    if m:
+        cand = clean(html.unescape(m.group(1)))
+        if cand:
+            return cand
+    m = re.search(r"(?is)<title[^>]*>(.*?)</title>", html_text)
+    if m:
+        return clean(text_of(m.group(1)).split("|")[0])
+    return ""
 
 def phones_of(html_text, t):
     raw = [m.group(1) for m in TEL_RE.finditer(html_text)]
@@ -216,11 +233,7 @@ def make_caption(d):
 
 def parse_am(html_text, path):
     t = text_of(html_text)
-
-    title = ""
-    m = re.search(r"(?is)<h1[^>]*>(.*?)</h1>", html_text)
-    if m:
-        title = clean(text_of(m.group(1)))
+    title = title_of(html_text)
 
     company = ""
     m = re.search(r'(?is)<a[^>]+href="[^"]*?/hy/company/[^"]*"[^>]*>(.*?)</a>', html_text)
@@ -317,11 +330,7 @@ def parse_am(html_text, path):
 
 def parse_jf(html_text, pid):
     t = text_of(html_text)
-
-    title = ""
-    m = re.search(r"(?is)<h1[^>]*>(.*?)</h1>", html_text)
-    if m:
-        title = clean(text_of(m.group(1)))
+    title = title_of(html_text, ("h1", "h2", "h3", "h4", "h5"))
 
     company = ""
     m = re.search(r'(?is)<a[^>]+href="[^"]*?/company/[^"]*"[^>]*>(.*?)</a>', html_text)
