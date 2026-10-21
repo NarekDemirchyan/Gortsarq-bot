@@ -2,10 +2,12 @@
 """
 Общий модуль: чтение страниц, перевод и общая тетрадь публикаций.
 
-Чтение в три ступени (что первое ответит — то и берём):
+Чтение по ступеням, что первое ответит — то и берём:
   1) r.jina.ai, движок browser — отдаёт markdown, под который написаны парсеры;
   2) прямой requests с браузерными заголовками — HTML переводим в тот же markdown;
-  3) открытые прокси (allorigins, codetabs) — тоже HTML -> markdown.
+  3) playwright chromium — настоящий браузер, проходит проверку «Checking your browser»;
+  4) cloudscraper — повторный запрос с решением простой защиты;
+  5) открытые прокси (allorigins, codetabs) — тоже HTML -> markdown.
 Плюс sitecustomize.py: если запрос получил отказ защиты, он повторяется через
 cloudscraper — это ещё одна ступень, включается сама.
 
@@ -165,42 +167,112 @@ def to_md(h, base=""):
     h = re.sub(r"\n{3,}", "\n\n", h)
     return h.strip()
 
+def _wall(h):
+    """Страница ещё сидит на проверке, а не отдала объявление."""
+    t = _plain(h).lower()
+    return len(t) < 400 or any(m in t for m in BLOCKED)
+
+def _cloudscraper(url):
+    try:
+        import cloudscraper
+    except Exception as e:
+        print("  cloudscraper нет:", type(e).__name__)
+        return ""
+    try:
+        s = cloudscraper.create_scraper(
+            browser={"browser": "chrome", "platform": "windows", "mobile": False})
+        r = s.get(url, headers=HDRS, timeout=60)
+        if r.status_code == 200 and not _wall(r.text):
+            print("  через cloudscraper")
+            return to_md(r.text, url)
+        print(f"  cloudscraper {r.status_code}, {len(r.text)} знаков")
+    except Exception as e:
+        print("  cloudscraper ошибка:", type(e).__name__)
+    return ""
+
+def _browser(url):
+    """Настоящий браузер (playwright chromium) — проходит проверку,
+    которую не проходят ни requests, ни cloudscraper."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as e:
+        print("  браузер: playwright нет —", type(e).__name__)
+        return ""
+    h = ""
+    try:
+        with sync_playwright() as p:
+            b = p.chromium.launch(args=["--no-sandbox"])
+            pg = b.new_page(user_agent=UA, locale="ru-RU")
+            pg.route(re.compile(r"\.(png|jpe?g|gif|webp|svg|woff2?|ttf|otf)(\?|$)"),
+                     lambda r: r.abort())
+            pg.goto(url, timeout=60000, wait_until="domcontentloaded")
+            for _ in range(4):
+                pg.wait_for_timeout(5000)
+                h = pg.content()
+                if len(h) > 5000 and not _wall(h):
+                    break
+            b.close()
+        if h and len(h) > 1500 and not _wall(h):
+            print("  через браузер")
+            return to_md(h, url)
+        print("  браузер: страница так и не открылась")
+    except Exception as e:
+        print("  браузер ошибка:", type(e).__name__)
+    return ""
+
 # ---------- чтение ----------
 
+_WALL_HIT = False  # сайт однажды показал проверку — дальше сразу браузером
+
 def jina(sess, url, extra=None, tries=2):
+    global _WALL_HIT
     h = dict(HDRS)
     h["x-engine"] = "browser"
     if extra:
         h.update(extra)
 
-    for attempt in range(tries):
-        try:
-            r = sess.get(JINA + url, headers=h, timeout=90)
-            if r.status_code == 200 and not is_blocked(r.text):
-                return r.text
-            print(f"  jina {r.status_code}, {len(r.text)} знаков")
-        except Exception as e:
-            print("  jina ошибка:", type(e).__name__)
-        time.sleep(2 + 2 * attempt)
+    if not _WALL_HIT:
+        for attempt in range(tries):
+            try:
+                r = sess.get(JINA + url, headers=h, timeout=60)
+                if r.status_code == 200 and not is_blocked(r.text):
+                    return r.text
+                print(f"  jina {r.status_code}, {len(r.text)} знаков")
+            except Exception as e:
+                print("  jina ошибка:", type(e).__name__)
+            time.sleep(2 + 2 * attempt)
 
-    try:
-        r = sess.get(url, headers=HDRS, timeout=60)
-        if r.status_code == 200 and len(r.text) > 1500 and not is_blocked(r.text):
-            print("  прямой вход")
-            return to_md(r.text, url)
-        print(f"  прямой {r.status_code}, {len(r.text)} знаков")
-    except Exception as e:
-        print("  прямой ошибка:", type(e).__name__)
-
-    for p in PROXIES:
         try:
-            r = sess.get(p, params={"url": url}, headers=HDRS, timeout=90)
-            if r.status_code == 200 and len(r.text) > 1500:
-                print("  через прокси")
+            r = sess.get(url, headers=HDRS, timeout=45)
+            if r.status_code == 200 and len(r.text) > 1500 and not is_blocked(r.text):
+                print("  прямой вход")
                 return to_md(r.text, url)
-            print(f"  прокси {r.status_code}, {len(r.text)} знаков")
+            print(f"  прямой {r.status_code}, {len(r.text)} знаков")
         except Exception as e:
-            print("  прокси ошибка:", type(e).__name__)
+            print("  прямой ошибка:", type(e).__name__)
+    else:
+        print("  стенка известна — сразу браузер")
+
+    txt = _browser(url)
+    if txt:
+        _WALL_HIT = True
+        return txt
+
+    txt = _cloudscraper(url)
+    if txt:
+        _WALL_HIT = True
+        return txt
+
+    if not _WALL_HIT:
+        for p in PROXIES:
+            try:
+                r = sess.get(p, params={"url": url}, headers=HDRS, timeout=90)
+                if r.status_code == 200 and len(r.text) > 1500:
+                    print("  через прокси")
+                    return to_md(r.text, url)
+                print(f"  прокси {r.status_code}, {len(r.text)} знаков")
+            except Exception as e:
+                print("  прокси ошибка:", type(e).__name__)
 
     print("  чтение не удалось:", url)
     return ""
