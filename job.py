@@ -13,10 +13,11 @@ BASE    = "https://job.am"
 SITEMAP = "https://job.am/sitemap/jobs.xml"
 BASE2   = "https://jobfinder.am"
 
-DAYS    = 30
+DAYS      = 30
 QUEUE_MAX = 200
-REFILL_AT = 190      # ժամանակավոր՝ հետո վերադարձնել 50
-STEP      = 8
+REFILL_AT = 50      # սկսում է լցնել, երբ հերթը ցածր է այս թվից
+MIN_JF    = 12      # միշտ պահում է գոնե այսքան jobfinder-ի հայտարարություն
+STEP      = 8       # մեկ գործարկումից հավաքվող էջերի քանակ
 TRIES_MAX = 3
 
 HDRS = {
@@ -149,16 +150,19 @@ def field(block, label):
 
 def tags_of(ind, n=3):
     tags = []
-    for part in re.split(r"[,;]", ind or ""):
-        part = clean(part)
-        if part and len(tags) < n:
-            tag = "#" + part.replace(" ", "_")
-            if tag not in tags:
-                tags.append(tag)
+    for part in re.split(r"[,;/]", ind or ""):
+        words = clean(part).split()
+        if not words:
+            continue
+        tag = "#" + "_".join(words[:3])
+        if len(tag) > 26:
+            tag = tag[:26]
+        if tag not in tags and len(tags) < n:
+            tags.append(tag)
     return tags
 
 def cat_of(ind):
-    return clean(re.split(r"[,;]", ind)[0]) if ind else "այլ"
+    return clean(re.split(r"[,;/]", ind)[0]) if ind else "այլ"
 
 def make_caption(d):
     L = ["<b>%s</b>" % esc(d["title"])]
@@ -223,12 +227,11 @@ def parse_am(html_text, path):
               or next((k for k in HEAD_ALIASES if bare.startswith(k)), None)
         hit = HEAD_ALIASES.get(key, key) if key else None
         if hit:
-            name = "Աշխատավայրեր" if hit == "Աշխատավայրերը" else hit
-            same = next((s for s in sections if s[0] == name), None)
+            same = next((s for s in sections if s[0] == hit), None)
             if same is not None:
                 cur = same
             else:
-                cur = [name, []]
+                cur = [hit, []]
                 sections.append(cur)
             rest = clean(bare[len(key):])
             if rest and rest not in ("՝", ":"):
@@ -381,8 +384,8 @@ def listing(sess):
     h = get(sess, SITEMAP)
     if not h:
         return []
-    shift = 4 * 3600
-    edge = time.strftime("%Y-%m-%d", time.gmtime(time.time() + shift - DAYS * 86400))
+    edge = time.strftime("%Y-%m-%d",
+                         time.gmtime(time.time() + 4 * 3600 - DAYS * 86400))
     order, seen = [], set()
     for m in SITE_RE.finditer(h):
         url, mod = m.group(1), m.group(2)
@@ -526,24 +529,38 @@ def publish(sess, st):
     return False
 
 def collect(sess, st):
-    if len(st["queue"]) >= REFILL_AT:
+    q = st["queue"]
+    if len(q) >= QUEUE_MAX:
         return
+
+    jf = sum(1 for it in q if it.get("site") == "jf")
+    am = len(q) - jf
+
+    if len(q) >= REFILL_AT and jf >= MIN_JF:
+        return
+
     turn = st.get("turn", 0)
-    part = []
-    for _ in range(2):
+    if jf < MIN_JF and am >= jf:
+        fn = fill_jf
+    elif am < jf:
+        fn = fill_am
+    else:
         fn = fill_jf if turn % 2 == 0 else fill_am
-        part = fn(sess, st, STEP)
-        st["turn"] = turn + 1
-        if part:
-            break
-        turn += 1
-        time.sleep(2)
+    st["turn"] = turn + 1
+
+    part = fn(sess, st, STEP)
+    if not part:
+        other = fill_am if fn is fill_jf else fill_jf
+        part = other(sess, st, STEP)
+
     for it in part:
         if len(st["queue"]) >= QUEUE_MAX:
             break
         st["queue"].append(it)
     save(st)
-    print("հերթագրված՝", len(part), "| հերթ:", len(st["queue"]))
+
+    jf_now = sum(1 for it in st["queue"] if it.get("site") == "jf")
+    print("հերթագրված՝", len(part), "| հերթ:", len(st["queue"]), "| jobfinder՝", jf_now)
 
 def main():
     st = load()
