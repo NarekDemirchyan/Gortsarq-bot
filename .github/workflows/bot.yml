@@ -1,44 +1,61 @@
-name: gortsarq
+_PW = None
+_BRW = None
 
-on:
-  workflow_dispatch:
+def _reset():
+    global _PW, _BRW
+    try:
+        if _BRW:
+            _BRW.close()
+    except Exception:
+        pass
+    try:
+        if _PW:
+            _PW.stop()
+    except Exception:
+        pass
+    _BRW = None
+    _PW = None
 
-permissions:
-  contents: write
+def _browser(url):
+    """Настоящий браузер: проходит проверку и отдаёт страницу в markdown.
+    Браузер открывается один раз на весь запуск и переиспользуется —
+    раньше он поднимался и закрывался на каждой странице, и время уходило
+    на это. Картинки не глушим: галерея объявления появляется только после
+    их загрузки, поэтому ждём, пока в тексте не будет хотя бы одной."""
+    global _BRW, _PW
+    try:
+        import fetcher
+    except Exception as e:
+        print(" браузер недоступен:", type(e).__name__)
+        return ""
 
-concurrency:
-  group: baraxolka
-  cancel-in-progress: false
+    h, md, pg = "", "", None
+    try:
+        if _BRW is None:
+            from playwright.sync_api import sync_playwright
+            _PW = sync_playwright().start()
+            _BRW = _PW.chromium.launch(args=["--no-sandbox"])
+        pg = _BRW.new_page(user_agent=fetcher.UA, locale="ru-RU")
+        pg.goto(url, timeout=45000, wait_until="domcontentloaded")
+        for _ in range(5):
+            pg.wait_for_timeout(3000)
+            h = pg.content()
+            if len(h) < 5000 or any(w in h[:4000].lower() for w in BLOCK_WORDS):
+                continue
+            md = fetcher.to_md(h, url)
+            if "![" in md:
+                break
+    except Exception as e:
+        print(" браузер: сбой", type(e).__name__)
+        md = ""
+        _reset()
+    finally:
+        try:
+            if pg:
+                pg.close()
+        except Exception:
+            pass
 
-jobs:
-  run:
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install
-        run: |
-          pip install --quiet requests cloudscraper playwright
-          python -m playwright install --with-deps chromium
-
-      - name: Run bot
-        env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          JINA_KEY: ${{ secrets.JINA_KEY }}
-        run: python -c "import usercustomize, runpy; runpy.run_path('run.py', run_name='__main__')"
-
-      - name: Save state
-        if: always()
-        run: |
-          git config user.name "bot"
-          git config user.email "bot@users.noreply.github.com"
-          git add state*.json published.json 2>/dev/null || true
-          git commit -m "state $(date -u +%Y-%m-%dT%H:%M)" || true
-          git pull --rebase --autostash || true
-          git push || true
+    if not md and h:
+        md = fetcher.to_md(h, url)
+    return md if len(md) > 800 else ""
