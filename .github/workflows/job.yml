@@ -32,7 +32,7 @@ jobs:
           JOB_CHANNEL: ${{ secrets.JOB_CHANNEL }}
         run: python job.py ${{ github.event_name == 'workflow_dispatch' && inputs.mode || '' }}
       - name: Save state
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.mode == '' }}
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.mode != 'test' }}
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
