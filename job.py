@@ -249,7 +249,7 @@ def make_caption(d):
             L.append("• %s՝ %s" % (k, esc(v)))
     for head, items in d["sections"]:
         L.append("")
-        L.append("▪️ <b>%s</b>" % esc(head))
+        L.append("🔹 <b>%s</b>" % esc(head))
         for it in items:
             L.append("— %s" % esc(it))
     L.append("")
