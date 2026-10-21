@@ -33,7 +33,7 @@ LAT = re.compile(r"[A-Za-z]")
 SITE_RE = re.compile(r"<loc>\s*(https?://job\.am/hy/job/[^<\s]+?)\s*</loc>"
                      r"\s*<lastmod>\s*(\d{4}-\d{2}-\d{2})", re.I)
 DATE_RE = re.compile(r"(\d{2})\.(\d{2})\.(\d{4})")
-SLASH_DATE = re.compile(r"(\d{2})/(\d{2})/(\d{4})")
+DATE_ANY = re.compile(r"(\d{1,2})[./\-](\d{1,2})[./\-](\d{4})")
 DAYNUM_RE = re.compile(r"^\d{1,2}[\.\-/]")
 PHONE_RE = re.compile(r"(?:\+?374|\b0)[\s\-\(\)0-9]{7,18}")
 TEL_RE = re.compile(r"""tel:([+\d][\d\s\-\(\)]{6,20})""", re.I)
@@ -111,6 +111,15 @@ def expired(dl):
     except Exception:
         return False
 
+def deadline_of(t):
+    m = re.search(r"Վերջնաժամկետ", t)
+    if not m:
+        return ""
+    d = DATE_ANY.search(t[m.end():m.end() + 150])
+    if not d:
+        return ""
+    return "%02d.%02d.%s" % (int(d.group(1)), int(d.group(2)), d.group(3))
+
 def phones_of(html_text, t):
     raw = [m.group(1) for m in TEL_RE.finditer(html_text)]
     raw += [m.group(0) for m in PHONE_RE.finditer(t)]
@@ -141,7 +150,7 @@ def field(block, label):
             continue
         if any(line.startswith(x) for x in FIELDS) or line.startswith("Հեռ"):
             break
-        if DATE_RE.search(line) or DAYNUM_RE.match(line):
+        if DATE_ANY.search(line) or DAYNUM_RE.match(line):
             break
         vals.append(line)
         if len(vals) >= 2:
@@ -271,13 +280,6 @@ def parse_am(html_text, path):
         if plain:
             clean_sections = [("Նկարագրություն", plain)]
 
-    dl = ""
-    m = re.search(r"Վերջնաժամկետ", t)
-    if m:
-        d = DATE_RE.search(t[m.end():m.end() + 80])
-        if d:
-            dl = "%s.%s.%s" % (d.group(1), d.group(2), d.group(3))
-
     ind = field(block, "Ոլորտ")
     armenian = len(ARM.findall(title)) * 3 + len(ARM.findall(body))
     latin = len(LAT.findall(body))
@@ -292,7 +294,7 @@ def parse_am(html_text, path):
         "sched": field(block, "Աշխատանքային գրաֆիկ")[:70],
         "exp": field(block, "Աշխատանքային փորձ")[:50],
         "ind": ind[:90],
-        "deadline": dl,
+        "deadline": deadline_of(t),
         "phones": phones_of(html_text, t),
         "sections": clean_sections,
         "tags": tags_of(ind),
@@ -316,11 +318,6 @@ def parse_jf(html_text, pid):
     def lab(name):
         m = re.search(re.escape(name) + r"\s*`?\s*([^\n]{0,200})", t)
         return clean(m.group(1)) if m else ""
-
-    dl = ""
-    d = SLASH_DATE.search(lab("Վերջնաժամկետ"))
-    if d:
-        dl = "%s.%s.%s" % (d.group(1), d.group(2), d.group(3))
 
     ind = lab("Ոլորտ")
     place = lab("Վայրը").replace(",", ", ")
@@ -372,7 +369,7 @@ def parse_jf(html_text, pid):
         "sched": lab("Գրաֆիկ")[:70],
         "exp": lab("Փորձ")[:50],
         "ind": ind[:90],
-        "deadline": dl,
+        "deadline": deadline_of(t),
         "phones": phones_of(html_text, t),
         "sections": clean_sections,
         "tags": tags_of(ind),
@@ -399,10 +396,13 @@ def listing(sess):
     print("sitemap՝", len(order))
     return order
 
-def jf_max_id(sess):
+def jf_listing(sess):
     h = get(sess, BASE2 + "/hy/jobs")
-    ids = [int(x) for x in JF_LINK.findall(h or "")]
-    return max(ids) if ids else 0
+    ids = []
+    for x in JF_LINK.findall(h or ""):
+        if x not in ids:
+            ids.append(x)
+    return ids
 
 def fill_am(sess, st, n):
     if not st.get("jam_list"):
@@ -428,14 +428,17 @@ def fill_am(sess, st, n):
     return out
 
 def fill_jf(sess, st, n):
-    cur = st.get("jf_cursor") or jf_max_id(sess)
-    if not cur:
-        return []
     out, tries = [], 0
-    while cur > 1 and len(out) < n and tries < 40:
-        cur -= 1
+    while len(out) < n and tries < 25:
+        if not st.get("jf_list"):
+            fresh = [x for x in jf_listing(sess)
+                     if x not in st["seen"] and x not in st["published"]]
+            if not fresh:
+                break
+            st["jf_list"] = fresh
+            print("jf ցանկ՝", len(fresh))
+        pid = st["jf_list"].pop(0)
         tries += 1
-        pid = str(cur)
         if pid in st["seen"] or pid in st["published"]:
             continue
         h = get(sess, BASE2 + "/jobs/x/" + pid)
@@ -447,14 +450,24 @@ def fill_jf(sess, st, n):
         except Exception:
             st["seen"][pid] = 1
             continue
-        if not d["title"] or not d["hy"] or not d["phones"] or expired(d["deadline"]):
+
+        bad = ""
+        if not d["title"]:
+            bad = "վերնագիր չկա"
+        elif not d["hy"]:
+            bad = "ոչ հայերեն"
+        elif not d["phones"]:
+            bad = "հեռախոս չկա"
+        elif expired(d["deadline"]):
+            bad = "ժամկետը լրացել է"
+        if bad:
             st["seen"][pid] = 1
-            print("  jf բաց թողնված՝", pid)
+            print("  jf բաց թողնված՝", pid, "|", bad)
             continue
+
         out.append({"path": "/jobs/x/" + pid, "id": pid, "cat": d["cat"], "site": "jf",
                     "text": make_caption(d)})
         time.sleep(1)
-    st["jf_cursor"] = cur
     save(st)
     return out
 
