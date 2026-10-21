@@ -163,7 +163,7 @@ def parse(html_text, path):
     salary = re.sub(r"^Ամսական\s*", "", field(block, "Աշխատավարձ"))
 
     dl = ""
-    m = re.search(r"Վերջնաժամկետ[^\n]{0,40}", block + "\n" + body)
+    m = re.search(r"Վերջնաժամկետ[^\n]{0,40}", t)
     if m:
         d = DATE_RE.search(m.group(0))
         if d:
@@ -316,7 +316,7 @@ def publish(sess, st):
 
 def collect(sess, st):
     groups, order = {}, []
-    for path in listing(sess):
+    for path in ([] if len(st["queue"]) >= QUEUE_MAX else listing(sess)):
         jid = path.rstrip("/").split("-")[-1]
         if jid in st["seen"] or jid in st["published"]:
             continue
@@ -377,8 +377,8 @@ def main():
             print(make_caption(d))
         return
 
-    publish(sess, st)
     collect(sess, st)
+    publish(sess, st)
     print("վերջ. հերթում՝", len(st["queue"]))
 
 if __name__ == "__main__":
