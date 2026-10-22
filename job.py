@@ -114,6 +114,13 @@ def money(s):
         return ""
     return re.sub(r"\.0{3,}$", ".000", s)
 
+def fp_of(text):
+    t = " ".join((text or "").lower().split())[:300]
+    h = 0
+    for ch in t:
+        h = (h * 131 + ord(ch)) % 1000000007
+    return "fp%d" % h
+
 def expired(dl):
     if not dl:
         return False
@@ -572,9 +579,19 @@ def publish(sess, st):
                 print("  տեքստ դեռ չկա, հերթը մնում է նույնը")
                 return False
 
+        fps = st.setdefault("fps", {})
+        mk = fp_of(text)
+        if fps.get(mk):
+            st["seen"][item["id"]] = 1
+            st["queue"].pop(idx)
+            save(st)
+            print("  նույն հայտարարությունն արդեն եղել է, բաց թողնված")
+            continue
+
         if send(sess, text):
             st["published"][item["id"]] = 1
             st["last_site"] = item.get("site", "am")
+            fps[mk] = 1
             st["queue"].pop(idx)
             save(st)
             print("հրապարակված՝", item["id"], item.get("site", "am"))
