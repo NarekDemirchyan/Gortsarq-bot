@@ -68,6 +68,8 @@ FORM = ("Անուն Ազգանուն", "Էլ. հասցե", "Նշեք գործո�
         "Հեռախոս *", "Ծածկագիր", "Դիմել այս")
 SENT_END = (".", ":", "!", "?", "։", "»", ";", "…")
 JUNK = ("$", "(", ")", "{", "}", "[", "]", "->")
+BAD_TITLES = ("Նմանատիպ աշխատանքներ", "Ակտիվ աշխատանքներ",
+              "Այլ աշխատանքներ", "Վերջին աշխատանքներ", "Աշխատանքներ")
 
 def get(sess, url):
     for _ in range(2):
@@ -135,12 +137,12 @@ def title_of(html_text, tags=("h1",)):
         m = re.search(r"(?is)<%s[^>]*>(.*?)</%s>" % (tag, tag), html_text)
         if m:
             cand = clean(text_of(m.group(1)))
-            if cand:
+            if cand and cand not in BAD_TITLES:
                 return cand
     m = re.search(r'(?is)<meta[^>]+property="og:title"[^>]+content="([^"]+)"', html_text)
     if m:
         cand = clean(html.unescape(m.group(1)))
-        if cand:
+        if cand and cand not in BAD_TITLES:
             return cand
     m = re.search(r"(?is)<title[^>]*>(.*?)</title>", html_text)
     if m:
@@ -245,7 +247,7 @@ def make_caption(d):
 
 def parse_am(html_text, path):
     t = text_of(html_text)
-    title = title_of(html_text)
+    title = title_of(html_text, ("h1", "h2"))
 
     company = ""
     m = re.search(r'(?is)<a[^>]+href="[^"]*?/hy/company/[^"]*"[^>]*>(.*?)</a>', html_text)
