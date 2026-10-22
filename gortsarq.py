@@ -93,7 +93,10 @@ def today_str():
     return time.strftime("%d.%m.%Y", time.gmtime(time.time() + 4 * 3600))
 
 def scrub(text):
-    return " ".join(MASK_RE.sub(" ", text or "").split())
+        t = MASK_RE.sub(" ", text or "")
+    t = re.sub(r"\s*([,.;:!?])\s*", r"\1 ", t)
+    t = re.sub(r"^[\s,.;:!?\-]+", "", t)
+    return " ".join(t.split()).strip(" ,.;:!?-")
 
 def last_days(n):
     out = set()
