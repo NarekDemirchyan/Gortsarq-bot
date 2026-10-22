@@ -629,8 +629,17 @@ def main():
     n_today = led_today()
     print(f"готово, публикаций за запуск: {done} | сегодня всего: {n_today}")
     return done
-# ---- ուղղում. նույն հայտարարությունը մեկ օրում երկու անգամ չի հրապարակվում ----
+# ---- ուղղում. նույն բովանդակությունը նորից չի հրապարակվում ----
 _orig_publish_one = publish_one
+
+def fp_key(d):
+    t = " ".join([d.get("title") or "", d.get("price") or "",
+                  (d.get("desc") or "")[:200], d.get("place") or ""]).lower()
+    t = " ".join(t.split())
+    h = 0
+    for ch in t:
+        h = (h * 131 + ord(ch)) % 1000000007
+    return "fp%d" % h
 
 def publish_one(sess, st, e, now):
     path = e["path"]
@@ -641,12 +650,31 @@ def publish_one(sess, st, e, now):
         return "skip"
     if st.get("published", {}).get(path) and e.get("date") != today_str():
         return "skip"
+
+    fps = st.setdefault("fps", {})
+    d = None
+    try:
+        d = item_data(sess, path)
+    except Exception:
+        d = None
+    if d:
+        k = fp_key(d)
+        if fps.get(k):
+            print("  նույնը արդեն եղել է՝", k)
+            st["seen"][path] = True
+            return "skip"
+
     res = _orig_publish_one(sess, st, e, now)
     if res == "ok":
         day[path] = today_str()
+        if d:
+            fps[fp_key(d)] = today_str()
         if len(day) > 20000:
             for k in list(day)[:12000]:
                 day.pop(k, None)
+        if len(fps) > 20000:
+            for k in list(fps)[:12000]:
+                fps.pop(k, None)
     return res
 
 # ---- մեկանգամյա մաքրում. հերթը՝ զրոյից, վերջին 60 օրը ----
