@@ -262,10 +262,10 @@ def parse_am(html_text, path):
         company = clean(text_of(m.group(1)))
 
     start = t.find(title) if title else -1
-        stop = t.find("Նկարագրություն")
-        if stop < 0:
-            stop = (t.find(title) + len(title)) if title and t.find(title) >= 0 else 0
-    block = t[max(start, 0):stop] if start >= 0 else t[:stop]
+    stop = t.find("Նկարագրություն")
+    if stop < 0:
+        stop = (start + len(title)) if start >= 0 else 0
+    block = t[:stop] if start < 0 else t[start:stop]
 
     body_end = len(t)
     for w in STOP_WORDS:
@@ -316,8 +316,10 @@ def parse_am(html_text, path):
 
     if not clean_sections:
         plain = []
-        for line in body.split("\n")[1:]:
+        for line in body.split("\n"):
             low = clean(line.lstrip("—-•·–🔺"))
+            if not low or low in STOP_LINES or low == title:
+                continue
             if any(f in low for f in FORM):
                 break
             if len(low) > 25 and ARM.search(low) and low not in plain:
