@@ -550,23 +550,25 @@ def publish(sess, st):
         tried += 1
         text = item.get("text") or ""
 
-        if not text:
+        if item.get("v") != VER:
             base = BASE2 if item.get("site") == "jf" else BASE
             h = get(sess, base + item["path"])
-            if not h:
+            if h:
+                d = parse_jf(h, item["id"]) if item.get("site") == "jf" else parse_am(h, item["path"])
+                if expired(d["deadline"]) or not d["hy"] or not d["title"]:
+                    st["seen"][item["id"]] = 1
+                    st["queue"].pop(idx)
+                    save(st)
+                    continue
+                text = make_caption(d)
+                if not d["phones"]:
+                    text += "\n🔗 Դիմելու համար՝ https://jobfinder.am/jobs/x/%s" % item["id"]
+                item["text"] = text
+                item["v"] = VER
+                save(st)
+            elif not text:
                 print("  տեքստ դեռ չկա, հերթը մնում է նույնը")
                 return False
-            d = parse_jf(h, item["id"]) if item.get("site") == "jf" else parse_am(h, item["path"])
-            if expired(d["deadline"]) or not d["hy"] or not d["title"]:
-                st["seen"][item["id"]] = 1
-                st["queue"].pop(idx)
-                save(st)
-                continue
-            text = make_caption(d)
-            if not d["phones"]:
-                text += "\n🔗 Դիմելու համար՝ https://jobfinder.am/jobs/x/%s" % item["id"]
-            item["text"] = text
-            save(st)
 
         if send(sess, text):
             st["published"][item["id"]] = 1
@@ -609,6 +611,7 @@ def collect(sess, st):
     for it in part:
         if len(st["queue"]) >= QUEUE_MAX:
             break
+        it["v"] = VER
         st["queue"].append(it)
     save(st)
 
