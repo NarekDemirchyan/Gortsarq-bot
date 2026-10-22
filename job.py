@@ -19,7 +19,7 @@ REFILL_AT = 50
 MIN_JF    = 12
 STEP      = 8
 TRIES_MAX = 3
-VER       = 3
+VER       = 4
 
 BULLET = "🔺"
 
@@ -257,9 +257,11 @@ def parse_am(html_text, path):
     title = title_of(html_text, ("h1", "h2"))
 
     company = ""
-    m = re.search(r'(?is)<a[^>]+href="[^"]*?/hy/company/[^"]*"[^>]*>(.*?)</a>', html_text)
-    if m:
-        company = clean(text_of(m.group(1)))
+    for m in re.finditer(r'(?is)<a[^>]+href="[^"]*?/hy/company/[^"]*"[^>]*>(.*?)</a>', html_text):
+        cand = clean(text_of(m.group(1)))
+        if cand:
+            company = cand
+            break
 
     start = t.find(title) if title else -1
     stop = t.find("Նկարագրություն")
@@ -356,9 +358,11 @@ def parse_jf(html_text, pid):
     title = title_of(html_text, ("h1", "h2", "h3", "h4", "h5"))
 
     company = ""
-    m = re.search(r'(?is)<a[^>]+href="[^"]*?/company/[^"]*"[^>]*>(.*?)</a>', html_text)
-    if m:
-        company = clean(text_of(m.group(1)))
+    for m in re.finditer(r'(?is)<a[^>]+href="[^"]*?/company/[^"]*"[^>]*>(.*?)</a>', html_text):
+        cand = clean(text_of(m.group(1)))
+        if cand:
+            company = cand
+            break
 
     def lab(name):
         m = re.search(re.escape(name) + r"\s*`?\s*([^\n]{0,200})", t)
@@ -373,13 +377,13 @@ def parse_jf(html_text, pid):
         low = clean(line)
         if not low:
             continue
-        if low.startswith("Դիմել") or low.startswith("Ընկերության մասին"):
-            break
         if low in JF_HEADS:
             cur = [JF_HEADS[low], []]
             sections.append(cur)
             started = True
             continue
+        if started and (low.startswith("Դիմել") or low.startswith("Ընկերության մասին")):
+            break
         if not started or cur is None:
             continue
         it = clean(low.lstrip("-–•—🔺 "))
