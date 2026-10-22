@@ -16,7 +16,7 @@ import urllib.parse
 
 import requests
 
-from fetcher import translate, script, has_cyr, is_translit_hy, led_add
+from fetcher import translate, script, has_cyr, is_translit_hy, led_add, led_has
 
 try:
     from fetcher import to_md
@@ -630,6 +630,8 @@ _orig_publish_one = publish_one
 
 def publish_one(sess, st, e, now):
     path = e["path"]
+    if led_has(SITE, e.get("id") or ""):
+        return "skip"
     day = st.setdefault("pub_day", {})
     if day.get(path) == today_str():
         return "skip"
