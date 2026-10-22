@@ -262,9 +262,9 @@ def parse_am(html_text, path):
         company = clean(text_of(m.group(1)))
 
     start = t.find(title) if title else -1
-    stop = t.find("Նկարագրություն")
+        stop = t.find("Նկարագրություն")
     if stop < 0:
-        stop = len(t)
+        stop = (t.find(title) + len(title)) if title and t.find(title) >= 0 else 0
     block = t[max(start, 0):stop] if start >= 0 else t[:stop]
 
     body_end = len(t)
