@@ -19,6 +19,7 @@ REFILL_AT = 50
 MIN_JF    = 12
 STEP      = 8
 TRIES_MAX = 3
+VER       = 3
 
 BULLET = "🔺"
 
@@ -66,6 +67,7 @@ FORM = ("Անուն Ազգանուն", "Էլ. հասցե", "Նշեք գործո�
         "Ուղարկել", "Կցել", "Ընտրեք ֆայլ", "Գրանցվել", "Ձեր անունը",
         "Հեռախոս *", "Ծածկագիր", "Դիմել այս")
 SENT_END = (".", ":", "!", "?", "։", "»", ";", "…")
+JUNK = ("$", "(", ")", "{", "}", "[", "]", "->")
 
 def get(sess, url):
     for _ in range(2):
@@ -101,9 +103,14 @@ def clean(s):
 def esc(s):
     return html.escape(s or "", quote=False)
 
+def junk(s):
+    return any(ch in s for ch in JUNK)
+
 def money(s):
     s = clean(s or "")
-    return s if re.search(r"\d", s) else ""
+    if not re.search(r"\d", s):
+        return ""
+    return re.sub(r"\.0{3,}$", ".000", s)
 
 def expired(dl):
     if not dl:
@@ -175,7 +182,10 @@ def field(block, label):
         vals.append(line)
         if len(vals) >= 2:
             break
-    return clean(" ".join(vals))[:120]
+    val = clean(" ".join(vals))[:120]
+    if junk(val):
+        return ""
+    return val
 
 def tags_of(ind, n=3):
     tags = []
@@ -201,6 +211,8 @@ def join_ok(prev):
     return bool(prev) and not prev.rstrip().endswith(SENT_END)
 
 def add_item(cur, item):
+    if junk(item):
+        return
     if item[0].islower() and cur[1] and join_ok(cur[1][-1]):
         cur[1][-1] = (cur[1][-1] + " " + item)[:400]
     elif len(item) > 3:
@@ -339,7 +351,8 @@ def parse_jf(html_text, pid):
 
     def lab(name):
         m = re.search(re.escape(name) + r"\s*`?\s*([^\n]{0,200})", t)
-        return clean(m.group(1)) if m else ""
+        val = clean(m.group(1)) if m else ""
+        return "" if junk(val) else val
 
     ind = lab("Ոլորտ")
     place = lab("Վայրը").replace(",", ", ")
@@ -500,6 +513,10 @@ def load():
     st.setdefault("queue", [])
     st.setdefault("seen", {})
     st.setdefault("published", {})
+    if st.get("ver") != VER:
+        st["seen"] = {}
+        st["jf_list"] = []
+        st["ver"] = VER
     return st
 
 def save(st):
