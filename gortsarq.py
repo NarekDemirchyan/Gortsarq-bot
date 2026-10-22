@@ -633,8 +633,7 @@ def main():
 _orig_publish_one = publish_one
 
 def fp_key(d):
-    t = " ".join([d.get("title") or "", d.get("price") or "",
-                  (d.get("desc") or "")[:200], d.get("place") or ""]).lower()
+    t = " ".join([d.get("title") or "", d.get("price") or ""]).lower()
     t = " ".join(t.split())
     h = 0
     for ch in t:
