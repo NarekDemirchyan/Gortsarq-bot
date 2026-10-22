@@ -39,9 +39,9 @@ jobs:
           git config user.name "bot"
           git config user.email "bot@users.noreply.github.com"
           git add state-gortsarq.json published.json 2>/dev/null || true
-          git commit -m "state $(date -u +%Y-%m-%dT%H:%M)" || true
+          git diff --cached --quiet || git commit -m "state $(date -u +%Y-%m-%dT%H:%M)"
           for i in 1 2 3; do
-            git pull --rebase --autostash || true
-            git push && break
+            git pull --rebase --autostash -q || true
+            if git push; then break; fi
             sleep 5
           done
