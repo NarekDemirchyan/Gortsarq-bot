@@ -263,8 +263,8 @@ def parse_am(html_text, path):
 
     start = t.find(title) if title else -1
         stop = t.find("Նկարագրություն")
-    if stop < 0:
-        stop = (t.find(title) + len(title)) if title and t.find(title) >= 0 else 0
+        if stop < 0:
+            stop = (t.find(title) + len(title)) if title and t.find(title) >= 0 else 0
     block = t[max(start, 0):stop] if start >= 0 else t[:stop]
 
     body_end = len(t)
