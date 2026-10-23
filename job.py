@@ -19,7 +19,7 @@ REFILL_AT = 50
 MIN_JF    = 12
 STEP      = 8
 TRIES_MAX = 3
-VER       = 4
+VER       = 5
 
 BULLET = "🔺"
 
@@ -461,6 +461,7 @@ def jf_listing(sess):
 def fill_am(sess, st, n):
     if not st.get("jam_list"):
         st["jam_list"] = listing(sess)
+    fps = st.setdefault("fps", {})
     out = []
     while st["jam_list"] and len(out) < n:
         path = st["jam_list"].pop(0)
@@ -475,13 +476,19 @@ def fill_am(sess, st, n):
             st["seen"][jid] = 1
             print("  am բաց թողնված՝", jid)
             continue
+        text = make_caption(d)
+        if fps.get(fp_of(text)):
+            st["seen"][jid] = 1
+            print("  am կրկնություն՝", jid)
+            continue
         out.append({"path": path, "id": jid, "cat": d["cat"], "site": "am",
-                    "text": make_caption(d)})
+                    "text": text})
         time.sleep(1)
     save(st)
     return out
 
 def fill_jf(sess, st, n):
+    fps = st.setdefault("fps", {})
     out, tries = [], 0
     while len(out) < n and tries < 25:
         if not st.get("jf_list"):
@@ -518,6 +525,10 @@ def fill_jf(sess, st, n):
             continue
 
         text = make_caption(d)
+        if fps.get(fp_of(text)):
+            st["seen"][pid] = 1
+            print("  jf կրկնություն՝", pid)
+            continue
         if not d["phones"]:
             text += "\n🔗 Դիմելու համար՝ https://jobfinder.am/jobs/x/%s" % pid
 
@@ -535,6 +546,7 @@ def load():
     st.setdefault("queue", [])
     st.setdefault("seen", {})
     st.setdefault("published", {})
+    st.setdefault("fps", {})
     if st.get("ver") != VER:
         st["seen"] = {}
         st["jf_list"] = []
@@ -564,12 +576,16 @@ def pick(st):
                 return i
     return 0
 
+def drop_id(st, item):
+    st["seen"][item["id"]] = 1
+    st["queue"] = [x for x in st["queue"] if x.get("id") != item["id"]]
+    save(st)
+
 def publish(sess, st):
-    tried = 0
-    while st["queue"] and tried < TRIES_MAX:
+    tried, skips = 0, 0
+    while st["queue"] and tried < TRIES_MAX and skips < 60:
         idx = pick(st)
         item = st["queue"][idx]
-        tried += 1
         text = item.get("text") or ""
 
         if item.get("v") != VER:
@@ -578,9 +594,8 @@ def publish(sess, st):
             if h:
                 d = parse_jf(h, item["id"]) if item.get("site") == "jf" else parse_am(h, item["path"])
                 if expired(d["deadline"]) or not d["hy"] or not d["title"]:
-                    st["seen"][item["id"]] = 1
-                    st["queue"].pop(idx)
-                    save(st)
+                    drop_id(st, item)
+                    skips += 1
                     continue
                 text = make_caption(d)
                 if not d["phones"]:
@@ -595,24 +610,24 @@ def publish(sess, st):
         fps = st.setdefault("fps", {})
         mk = fp_of(text)
         if fps.get(mk):
-            st["seen"][item["id"]] = 1
-            st["queue"].pop(idx)
-            save(st)
+            drop_id(st, item)
+            skips += 1
             print("  նույն հայտարարությունն արդեն եղել է, բաց թողնված")
             continue
 
+        tried += 1
         if send(sess, text):
             st["published"][item["id"]] = 1
             st["last_site"] = item.get("site", "am")
             fps[mk] = 1
-            st["queue"].pop(idx)
+            st["queue"] = [x for x in st["queue"] if x.get("id") != item["id"]]
             save(st)
             print("հրապարակված՝", item["id"], item.get("site", "am"))
             return True
         print("  չուղարկվեց, մնում է հերթում")
         return False
 
-    print("ուշադրություն՝ ոչինչ չհրապարակվեց,", tried, "փորձից հետո | հերթ:", len(st["queue"]))
+    print("ուշադրություն՝ ոչինչ չհրապարակվեց,", tried, "փորձ,", skips, "կրկնություն | հերթ:", len(st["queue"]))
     return False
 
 def collect(sess, st):
@@ -640,11 +655,15 @@ def collect(sess, st):
         other = fill_am if fn is fill_jf else fill_jf
         part = other(sess, st, STEP)
 
+    have = {it.get("id") for it in st["queue"]}
     for it in part:
         if len(st["queue"]) >= QUEUE_MAX:
             break
+        if it["id"] in have:
+            continue
         it["v"] = VER
         st["queue"].append(it)
+        have.add(it["id"])
     save(st)
 
     jf_now = sum(1 for it in st["queue"] if it.get("site") == "jf")
