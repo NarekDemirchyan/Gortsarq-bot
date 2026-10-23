@@ -19,7 +19,7 @@ REFILL_AT = 50
 MIN_JF    = 12
 STEP      = 8
 TRIES_MAX = 3
-VER       = 5
+VER       = 6
 
 BULLET = "🔺"
 
@@ -94,7 +94,7 @@ def text_of(h):
     h = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", h)
     h = html.unescape(h)
     h = re.sub(r"(?i)<br\s*/?>", "\n", h)
-    h = re.sub(r"(?i)</(div|p|li|h1|h2|h3|h4|h5|tr|section)>", "\n", h)
+    h = re.sub(r"(?i)</(div|p|li|h1|h2|h3|h4|h5|h6|tr|section|ul|ol)>", "\n", h)
     h = re.sub(r"(?s)<[^>]+>", " ", h)
     h = html.unescape(h).replace("\r", "")
     out = []
