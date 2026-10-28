@@ -42,6 +42,7 @@ MAX_PAGES   = 40
 MAX_TRIES   = 4
 MAX_POSTS   = 1
 SEND_TRIES  = 3
+MAXP        = 9 * 1024 * 1024
 RESET_ONCE  = False
 TEST        = False
 
@@ -167,13 +168,13 @@ def site_up(sess):
 _THUMBS_DESC = ("1024/1024", "800/800", "480/480", "320/320", "240/240")
 
 def thumb_urls(u):
-    """Նկարի բոլոր չափերը՝ ամբողջից մինչև մանրը։"""
+    """Նկարի չափերը՝ փոքրից մեծ. ամբողջականը վերջում է։"""
     out = []
     if "/images/detailed/" in u:
         tail = u.split("/images/detailed/", 1)[1]
         for size in _THUMBS_DESC:
             out.append(BASE + "/images/thumbnails/" + size + "/detailed/" + tail)
-    out.insert(0, u)
+    out.append(u)
     return out
 
 def relay_urls(u):
@@ -225,9 +226,9 @@ def photo_bytes(sess, url, ref):
     """Նկարը ներբեռնում ենք ինքներս՝ բոլոր չափերով ու ուղիներով։"""
     for u in thumb_urls(url):
         b = bytes_from(sess, u, ref)
-        if b:
+        if b and len(b) <= MAXP:
             return b
-    print("  նկարը չներբեռնվեց:", url)
+    print("  նկարը չներբեռնվեց կամ չափից մեծ է:", url)
     return None
 # ---------- разбор ----------
 
@@ -380,7 +381,7 @@ def send(sess, d, caption):
     blobs = []
     for u in (d.get("photos") or [])[:10]:
         b = photo_bytes(sess, u, d["url"])
-        if b:
+        if b and len(b) <= MAXP:
             blobs.append(b)
 
     markup = {"inline_keyboard": [
@@ -389,7 +390,7 @@ def send(sess, d, caption):
     ]}
 
     if not blobs:
-        print("  նկար չկա, ուղարկում ենք տեքստով")
+        print("  նկար չկա կամ չափից մեծ է, ուղարկում ենք տեքստով")
         r = tg_post(sess, "sendMessage",
                     {"chat_id": CHAT_ID, "text": caption,
                      "reply_markup": json.dumps(markup)}, timeout=60)
