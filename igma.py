@@ -10,10 +10,9 @@ igma.am -> Telegram («Բարախոլկա Երևան»).
  4. Տարբերությունը գործարքից. այստեղ կա «Թարմացվել է» ամսաթիվը, ուստի
     թարմացված հայտարարությունը ամեն վազքում նորից մտնում է հերթի պոչ։
  5. Կայքը չբացվելիս ոչինչ չի փոխվում՝ ոչ հրապարակում, ոչ դուրսգրում։
- 6. Հերթի պոչը լցվում է բաժինների միջև հերթով (round-robin), որ գրառումները
-    չգան նույն բաժնից անընդմեջ։
+ 6. Հերթի պոչը լցվում է բաժինների միջև հերթով (round-robin)։
 
-Բացառված են անշարժ գույքը, աշխատանքը և ծառայությունները. խումբը վաճառքի է։
+Բացառված են անշարժ գույքը, աշխատանքը, ծառայությունները և տրանսպորտը։
 Բաժինների համարները կայքից ենք ճանաչում ըստ վերնագրի, ոչ թե գուշակում։
 """
 import os
@@ -52,6 +51,8 @@ SEND_TRIES  = 3
 WATCH_K     = 30
 MAXP        = 9 * 1024 * 1024
 
+EXCLUDE_V   = 2
+
 BASE        = "https://igma.am"
 GROUP_BOOST = "https://t.me/boost/erevan03_baraxolka"
 
@@ -77,7 +78,8 @@ CANDIDATES = ("cat-200", "cat-400", "cat-500", "cat-600", "cat-700", "cat-800",
               "cat-5000", "cat-6000", "cat-7000", "cat-8000", "cat-9000",
               "cat-10000")
 
-EXCLUDE = ("անշարժ", "աշխատանք", "ծառայութ", "բոլոր")
+# անշարժ գույք, աշխատանք, ծառայություններ, տրանսպորտ, «բոլոր հայտարարությունները»
+EXCLUDE = ("անշարժ", "աշխատանք", "ծառայութ", "տրանսպորտ", "транспорт", "բոլոր")
 
 CARD_RE  = re.compile(r"\[!\[[^\]]*\]\(([^)]+)\)\]\((https://igma\.am/(?:[a-z]{2}/)?ads/(\d+))\)")
 PRICE_RE = re.compile(r"([\d][\d\s ]{0,12})\s*(֏|\$|€)")
@@ -185,35 +187,52 @@ def site_up(sess):
 # ---------- նկարներ ----------
 
 def relay_urls(u):
-    host = urlparse_part = u.split("://")[-1]
-    return [f"https://images.weserv.nl/?url={host}",
-            f"https://images.weserv.nl/?url={host}"]
+    bare = u.split("://", 1)[-1]
+    return [f"https://images.weserv.nl/?url={bare}",
+            f"https://wsrv.nl/?url={bare}"]
 
 def img_ok(r):
     b = r.content or b""
     if r.status_code != 200 or len(b) < 800:
         return False
-    return not b[:1] == b"<"
+    return not b.lstrip()[:1] == b"<"
 
-def photo_bytes(sess, url, path):
-    return _fetch_photo(url)
-
-def _fetch_photo(url, path=""):
-    import urllib.request
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": HDRS["User-Agent"]})
-        with urllib.request.urlopen(req, timeout=25) as r:
-            b = r.read()
-        if len(b) > 800 and len(b) <= MAXP and b[:1] != b"<":
-            return b
-    except Exception:
+def photo_bytes(sess, url, ref):
+    if _FAILS[0] >= 12:
         return None
+    h = dict(HDRS)
+    h["Referer"] = ref or BASE + "/"
+    h["Accept"] = "image/avif,image/webp,image/jpeg,image/*,*/*;q=0.8"
+    try:
+        r = sess.get(url, headers=h, timeout=25)
+        if img_ok(r) and len(r.content) <= MAXP:
+            _FAILS[0] = 0
+            return r.content
+    except Exception:
+        pass
+    for p in PROXIES[:2]:
+        try:
+            r = via_proxy(sess, p, url, h, 25)
+            if img_ok(r) and len(r.content) <= MAXP:
+                return r.content
+        except Exception:
+            pass
+    for p in relay_urls(url)[:1]:
+        try:
+            r = sess.get(p, headers=h, timeout=25)
+            if img_ok(r) and len(r.content) <= MAXP:
+                return r.content
+        except Exception:
+            pass
+    _FAILS[0] += 1
+    print("  նկարը չներբեռնվեց:", url)
     return None
 
 # ---------- բաժիններ ----------
 
 def cats(sess, st):
-    if st.get("cats"):
+    """Կայքից ճանաչում ենք բաժինները՝ ըստ վերնագրի, և թողնում վաճառքը։"""
+    if st.get("cats") and st.get("exclude_v") == EXCLUDE_V:
         return st["cats"]
     found = []
     for cat in CANDIDATES:
@@ -231,15 +250,16 @@ def cats(sess, st):
         time.sleep(1)
     if not found:
         print("  բաժինները չճանաչվեցին, վերցնում ենք հիմնականները")
-        found = ["cat-200", "cat-2000", "cat-3000", "cat-4000"]
+        found = ["cat-400", "cat-500", "cat-600"]
     st["cats"] = found
+    st["exclude_v"] = EXCLUDE_V
     save(st)
     return found
 
 # ---------- հավաքում ----------
 
 def list_url(cat, page):
-    u = "%s/listings?category=%s" % (BASE, cat)
+    u = "https://igma.am/listings?category=%s" % cat
     return u if page == 1 else u + "&page=%d" % page
 
 def get_items(sess, st, deadline):
@@ -286,22 +306,22 @@ def item_data(sess, path):
         md = md[:cut]
 
     title = ""
-    m = re.search(r"^#\s+(.+)$", md, re.M)
-    if m:
-        title = scrub(no_links(m.group(1)))
+    mt = re.search(r"^#\s+(.+)$", md, re.M)
+    if mt:
+        title = no_links(mt.group(1))
     if not title:
-        m = re.search(r"^#{1,3}\s+(.+)$", md, re.M)
-        if m:
-            title = scrub(no_links(m.group(1)))
+        mt = re.search(r"^#{1,3}\s+(.+)$", md, re.M)
+        if mt:
+            title = no_links(mt.group(1))
 
     price = ""
-    m = PRICE_RE.search(md[:1200])
-    if m:
-        num = " ".join(m.group(1).split())
+    mp = PRICE_RE.search(md[:1200])
+    if mp:
+        num = " ".join(mp.group(1).split())
         if re.search(r"[1-9]", num):
-            price = num + " " + m.group(2)
+            price = num + " " + mp.group(2)
 
-    tail = md[m.end():m.end() + 500] if m else md[:1000]
+    tail = md[mp.end():mp.end() + 500] if mp else md[:1000]
     parts = []
     for line in tail.split("\n"):
         low = scrub(line)
@@ -314,61 +334,61 @@ def item_data(sess, path):
         parts.append(low)
         if len(parts) >= 3:
             break
-    place = scrub(" ".join(parts)).replace("|", "·")[:80]
+    place = no_links(" ".join(parts)).replace("|", "·")[:80]
 
     desc = ""
-    m2 = re.search(r"##\s*Նկարագրություն\s*\n+(.+?)(?:\n+\s*Տեղադրված է|\Z)", md, re.S)
-    if m2:
-        desc = scrub(" ".join(m2.group(1).split()))
-        desc = no_links(desc)
+    mdsc = re.search(r"##\s*Նկարագրություն\s*\n+(.+?)(?:\n+\s*Տեղադրված է|\Z)", md, re.S)
+    if mdsc:
+        desc = no_links(" ".join(mdsc.group(1).split()))
 
     posted = ""
-    m3 = re.search(r"Տեղադրված է\s*(\d{2}\.\d{2}\.\d{4})", md)
-    if m3:
-        posted = m3.group(1)
+    mpo = re.search(r"Տեղադրված է\s*(\d{2}\.\d{2}\.\d{4})", md)
+    if mpo:
+        posted = mpo.group(1)
 
     updated = ""
-    m4 = re.search(r"Թարմացվել է\s*(\d{2}\.\d{2}\.\d{4})", md)
-    if m4:
-        updated = m3 and m4.group(1) or m4.group(1)
+    mup = re.search(r"Թարմացվել է\s*(\d{2}\.\d{2}\.\d{4})", md)
+    if mup:
+        updated = mup.group(1)
 
     specs = []
     for line in md.split("\n"):
         s = scrub(line)
         if not s or len(s) > 90 or s.startswith("#") or s.startswith("["):
             continue
-        mm = SPEC_RE.match(s)
-        if not mm:
+        msm = SPEC_RE.match(s)
+        if not msm:
             continue
-        k, v = scrub(mm.group(1)), scrub(no_links(mm.group(2)))
+        k = scrub(msm.group(1))
+        v = no_links(msm.group(2))
         if not v or len(v) > 60:
             continue
         if "http" in v.lower() or "igma.am" in v.lower():
             continue
-        if "Տեղադրված" in v or "Թարմացվել" in v:
-            continue
         if k in ("Գործակալություն", "Անհատ", "Igma.am"):
+            continue
+        if len(k) > 28 or v in ("Տեղադրված", "Թարմացվել"):
             continue
         specs.append((k, v))
         if len(specs) >= 6:
             break
 
     phone = ""
-    pm = PHONE_RE.search(md)
-    if pm:
-        phone = " ".join(pm.group(0).split())
+    mph = PHONE_RE.search(md)
+    if mph:
+        phone = " ".join(mph.group(0).split())
 
     photos = []
-    for m5 in IMG_RE.finditer(md):
-        u = m2.group(1) if False else m2 and None
-    photos = [u for u in [mm.group(1) for mm in IMG_RE.finditer(md)]
-              if "logo" not in u and "promo" not in u
-              and ("r2.dev" in u or "/storage/ads/" in u)]
-    dedup = []
-    for u in photos:
-        if u not in dedup:
-            dedup.append(u)
-    photos = dedup
+    for mi in IMG_RE.finditer(md):
+        u = m.group(1) if False else None
+    photos = []
+    for mi in IMG_RE.finditer(md):
+        u = mi.group(1)
+        if "logo" in u or "promo" in u:
+            continue
+        if "r2.dev" in u or "/storage/ads/" in u:
+            if u not in photos:
+                photos.append(u)
 
     print(f"  {path}: նկար {len(photos)}, «{title[:40]}», «{price}», "
           f"նկարագրություն {len(desc)}, թարմացված «{updated}», բնութագիր {len(specs)}")
@@ -381,13 +401,13 @@ def item_data(sess, path):
 # ---------- տեքստ ----------
 
 def headline(sess, d):
-    src = scrub(no_links(d.get("title") or ""))
-    t = scrub(no_links(translate(sess, src))) if src else ""
+    src = no_links(d.get("title") or "")
+    t = no_links(translate(sess, src)) if src else ""
     if src and (is_translit_hy(src) or is_translit_hy(t)):
         return ""
     if t and not re.search(r"(?:ться|тись)$", t.lower()) and (has_cyr(t) or script(t) == "lat"):
         return " ".join(t.split())[:90]
-    alt = scrub(no_links(translate(sess, (d.get("desc") or "")[:300])))
+    alt = no_links(translate(sess, (d.get("desc") or "")[:300]))
     if has_cyr(alt) and len(alt.split()) >= 3:
         return " ".join(re.split(r"[.!?]\s", alt)[0].split())[:90]
     if t and (has_cyr(t) or script(t) == "lat"):
@@ -539,7 +559,7 @@ def trim(st):
     while len(st["queue"]) > QUEUE_MAX:
         gone = st["queue"].pop(0)
         st["seen"][gone["path"]] = True
-        print("առաստեղ. գլխից դուրս եկավ:", gone["path"])
+        print("առաստաղ. գլխից դուրս եկավ:", gone["path"])
     if len(st["published"]) > 50000:
         keys = list(st["published"])[-20000:]
         st["published"] = {k: st["published"][k] for k in keys}
@@ -677,9 +697,11 @@ def main():
     now = time.time()
     deadline = now + MAX_SECONDS
 
+    # 1. Հրապարակում հավաքված հերթից
     done = publish_phase(sess, st, now, MAX_POSTS)
     save(st)
 
+    # 2. Հավաքում՝ վերջին 60 օրը
     items = get_items(sess, st, deadline)
     print("всего найдено:", len(items))
 
@@ -708,9 +730,11 @@ def main():
     trim(st)
     save(st)
 
+    # 3. Թարմացումների ստուգում
     if time.time() < deadline:
         recheck(sess, st, deadline)
 
+    # 4. Եթե այս վազքում դեռ ոչինչ դուրս չի եկել՝ փորձում ենք նորից
     if done < MAX_POSTS and st["queue"]:
         done += publish_phase(sess, st, time.time(), MAX_POSTS - done)
 
