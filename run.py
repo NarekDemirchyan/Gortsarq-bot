@@ -2,39 +2,26 @@
 """
 Запуск gortsarq.am / igma.am -> «Барахолка Երևան».
 
-Один запуск = один пост. Расписание задаёт внешний таймер, он же вызывает
-этот workflow. Если у сайта свежего нет — слот остаётся пустым.
-
-SITE = gortsarq | igma — если задан, берём его.
-Если пусто — чередуем по turn.json.
+Один запуск = один пост. Сайт выбирается по минуте запуска:
+  :15 и :45 — igma
+  :00 и :30 — gortsarq
+Если задан SITE (gortsarq | igma), он важнее.
 """
 import importlib
-import json
 import os
+import time
 
-MOD = "gortsarq"     # модуль по умолчанию
-TURN = "turn.json"
+MOD = "gortsarq"
 SITES = ("gortsarq", "igma")
 
 def pick():
     env = (os.environ.get("SITE") or "").strip().lower()
     if env in SITES:
         return env
-    last, n = "", 0
-    try:
-        with open(TURN, encoding="utf-8") as f:
-            st = json.load(f)
-        last = str(st.get("last") or "")
-        n = int(st.get("n") or 0)
-    except Exception:
-        pass
-    nxt = SITES[(SITES.index(last) + 1) % len(SITES)] if last in SITES else SITES[0]
-    try:
-        with open(TURN, "w", encoding="utf-8") as f:
-            json.dump({"last": nxt, "n": n + 1}, f, ensure_ascii=False)
-    except Exception as e:
-        print("turn.json: сбой записи:", e)
-    return nxt
+    for m in (14, 15, 16, 44, 45, 46):
+        if time.localtime().tm_min == m:
+            return "igma"
+    return MOD
 
 def run(which):
     try:
