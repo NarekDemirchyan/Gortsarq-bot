@@ -1,33 +1,40 @@
 # -*- coding: utf-8 -*-
 """
-Գործարկում է հերթապահ մոդուլը -> «Բարախոլկա Երևան»։
+Запуск gortsarq.am / igma.am -> «Барахолка Երևան».
 
-Մեկ վազք = մեկ գրառում։ Հերթը պտտվում է մեկ-մեկ՝ գործարք, igma, գործարք,
-igma։ Եթե հերթապահ կայքի հայտարարությունները վերջացել են, նույն վազքում
-հրապարակում է մյուսը, և հաջորդ անգամ նորից նույն հերթականությունն է։
-Ում հերթն է՝ գրվում է turn.json-ում։
+Один запуск = один пост. Расписание задаёт внешний таймер, он же вызывает
+этот workflow. Если у сайта свежего нет — слот остаётся пустым.
+
+SITE = gortsarq | igma — если задан, берём его.
+Если пусто — чередуем по turn.json.
 """
-import json
 import importlib
+import json
+import os
 
+MOD = "gortsarq"     # модуль по умолчанию
 TURN = "turn.json"
-ORDER = ("gortsarq", "igma")
+SITES = ("gortsarq", "igma")
 
-def read_turn():
+def pick():
+    env = (os.environ.get("SITE") or "").strip().lower()
+    if env in SITES:
+        return env
+    last, n = "", 0
     try:
-        t = json.load(open(TURN, encoding="utf-8"))
+        with open(TURN, encoding="utf-8") as f:
+            st = json.load(f)
+        last = str(st.get("last") or "")
+        n = int(st.get("n") or 0)
     except Exception:
-        t = {}
+        pass
+    nxt = SITES[(SITES.index(last) + 1) % len(SITES)] if last in SITES else SITES[0]
     try:
-        return int(t.get("i", 0)) % len(ORDER)
-    except Exception:
-        return 0
-
-def write_turn(i):
-    try:
-        json.dump({"i": i % len(ORDER)}, open(TURN, "w", encoding="utf-8"))
+        with open(TURN, "w", encoding="utf-8") as f:
+            json.dump({"last": nxt, "n": n + 1}, f, ensure_ascii=False)
     except Exception as e:
-        print("turn.json չգրվեց:", type(e).__name__)
+        print("turn.json: сбой записи:", e)
+    return nxt
 
 def run(which):
     try:
@@ -38,20 +45,8 @@ def run(which):
         return 0
 
 def main():
-    i = read_turn()
-    first, second = ORDER[i], ORDER[(i + 1) % len(ORDER)]
-
-    print("запуск ->", first)
-    if run(first):
-        write_turn((i + 1) % len(ORDER))
-        return 1
-
-    print("հերթը դատարկ է, փորձում ենք ->", second)
-    if run(second):
-        write_turn(i)
-        return 1
-
-    write_turn((i + 1) % len(ORDER))
-    return 0
+    which = pick()
+    print("запуск ->", which)
+    return run(which)
 
 main()
