@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-igma.am -> Telegram («Барахолка Երևան»).
+igma.am -> Telegram («Բարախոլկա Երևան»).
 
 Կառուցված է գործարք կայքի մոդուլի նույն ձևով, նույն սահմաններով.
  1. Հրապարակում ենք հերթի գլխից՝ FIFO. գլխից ոչինչ չի հանվում առանց հրապարակվելու
@@ -10,6 +10,8 @@ igma.am -> Telegram («Барахолка Երևան»).
  4. Տարբերությունը գործարքից. այստեղ կա «Թարմացվել է» ամսաթիվը, ուստի
     թարմացված հայտարարությունը ամեն վազքում նորից մտնում է հերթի պոչ։
  5. Կայքը չբացվելիս ոչինչ չի փոխվում՝ ոչ հրապարակում, ոչ դուրսգրում։
+ 6. Հերթի պոչը լցվում է բաժինների միջև հերթով (round-robin), որ գրառումները
+    չգան նույն բաժնից անընդմեջ։
 
 Բացառված են անշարժ գույքը, աշխատանքը և ծառայությունները. խումբը վաճառքի է։
 Բաժինների համարները կայքից ենք ճանաչում ըստ վերնագրի, ոչ թե գուշակում։
@@ -70,28 +72,46 @@ PROXIES = (
     "https://api.cors.lol/?url=",
 )
 
-# Բաժինների հնարավոր համարները։ Կոդը յուրաքանչյուրի վերնագիրն ստուգում է,
-# և թողնում միայն վաճառքի բաժինները։ Բաց թողնվածները չեն հիշվում։
 CANDIDATES = ("cat-200", "cat-400", "cat-500", "cat-600", "cat-700", "cat-800",
               "cat-900", "cat-1000", "cat-2000", "cat-3000", "cat-4000",
               "cat-5000", "cat-6000", "cat-7000", "cat-8000", "cat-9000",
               "cat-10000")
 
-# անշարժ գույք, աշխատանք, ծառայություններ, և «բոլոր հայտարարությունները»
 EXCLUDE = ("անշարժ", "աշխատանք", "ծառայութ", "բոլոր")
 
 CARD_RE  = re.compile(r"\[!\[[^\]]*\]\(([^)]+)\)\]\((https://igma\.am/(?:[a-z]{2}/)?ads/(\d+))\)")
 PRICE_RE = re.compile(r"([\d][\d\s ]{0,12})\s*(֏|\$|€)")
 IMG_RE   = re.compile(r"!\[[^\]]*\]\((https?://[^)]+)\)")
 ITEM_ID_RE = re.compile(r"/ads/(\d+)")
+PHONE_RE = re.compile(r"(?:\+374|0)\s?\d{2}[\s\-]?\d{2}[\s\-]?\d{2}[\s\-]?\d{2}")
+SPEC_RE  = re.compile(r"^([^:\n]{2,30}):\s*(.+)$")
 
-HEAD_FALLBACK = "Объявление"
+HEAD_FALLBACK = "Գովազդ"
 
 def scrub(text):
     t = " ".join((text or "").split())
     t = re.sub(r"\s*([,.;:!?])\s*", r"\1 ", t)
     t = re.sub(r"^[\s,.;:!?\-]+", "", t)
-    return t.strip(" ,.;:!?-")
+    return t.strip(" ,.;:!?-\"")
+
+def no_links(text):
+    t = text or ""
+    t = re.sub(r"\[([^\]]*)\]\((https?://[^)]*)\)", r"\1", t)
+    t = re.sub(r"\b(?:https?://|www\.)\S+", "", t)
+    t = re.sub(r"\bigma\.am\b", "", t, flags=re.I)
+    return scrub(t)
+
+def money(price):
+    t = scrub(price or "")
+    m = re.match(r"([\d\s.,]+)\s*(֏|\$|€)?", t)
+    if not m:
+        return ""
+    digits = re.sub(r"[^\d]", "", m.group(1))
+    if not digits:
+        return ""
+    num = "{:,}".format(int(digits)).replace(",", " ")
+    cur = m.group(2) or ""
+    return (num + " " + cur).strip()
 
 def today_str():
     return time.strftime("%d.%m.%Y", time.gmtime(time.time() + 4 * 3600))
@@ -165,51 +185,34 @@ def site_up(sess):
 # ---------- նկարներ ----------
 
 def relay_urls(u):
-    bare = u.split("://", 1)[-1]
-    return [f"https://images.weserv.nl/?url={bare}",
-            f"https://wsrv.nl/?url={bare}"]
+    host = urlparse_part = u.split("://")[-1]
+    return [f"https://images.weserv.nl/?url={host}",
+            f"https://images.weserv.nl/?url={host}"]
 
 def img_ok(r):
     b = r.content or b""
     if r.status_code != 200 or len(b) < 800:
         return False
-    return not b.lstrip()[:1] == b"<"
+    return not b[:1] == b"<"
 
-def photo_bytes(sess, url, ref):
-    if _FAILS[0] >= 12:
-        return None
-    h = dict(HDRS)
-    h["Referer"] = ref or BASE + "/"
-    h["Accept"] = "image/avif,image/webp,image/jpeg,image/*,*/*;q=0.8"
+def photo_bytes(sess, url, path):
+    return _fetch_photo(url)
+
+def _fetch_photo(url, path=""):
+    import urllib.request
     try:
-        r = sess.get(url, headers=h, timeout=25)
-        if img_ok(r) and len(r.content) <= MAXP:
-            _FAILS[0] = 0
-            return r.content
+        req = urllib.request.Request(url, headers={"User-Agent": HDRS["User-Agent"]})
+        with urllib.request.urlopen(req, timeout=25) as r:
+            b = r.read()
+        if len(b) > 800 and len(b) <= MAXP and b[:1] != b"<":
+            return b
     except Exception:
-        pass
-    for p in PROXIES[:2]:
-        try:
-            r = via_proxy(sess, p, url, h, 25)
-            if img_ok(r) and len(r.content) <= MAXP:
-                return r.content
-        except Exception:
-            pass
-    for p in relay_urls(url)[:1]:
-        try:
-            r = sess.get(p, headers=h, timeout=25)
-            if img_ok(r) and len(r.content) <= MAXP:
-                return r.content
-        except Exception:
-            pass
-    _FAILS[0] += 1
-    print("  նկարը չներբեռնվեց:", url)
+        return None
     return None
 
 # ---------- բաժիններ ----------
 
 def cats(sess, st):
-    """Կայքից ճանաչում ենք բաժինները՝ ըստ վերնագրի, և թողնում վաճառքը։"""
     if st.get("cats"):
         return st["cats"]
     found = []
@@ -240,7 +243,6 @@ def list_url(cat, page):
     return u if page == 1 else u + "&page=%d" % page
 
 def get_items(sess, st, deadline):
-    """Ցանկից հավաքում ենք հայտարարությունների հասցեները՝ գնով ու նկարով։"""
     found = {}
     for cat in cats(sess, st):
         per_cat = 0
@@ -263,7 +265,7 @@ def get_items(sess, st, deadline):
                     price = " ".join(pm.group(1).split()) + " " + pm.group(2)
                 found[path] = {"id": m.group(3), "path": path,
                                "date": "", "price": price, "place": "",
-                               "photo": m.group(1)}
+                               "photo": m.group(1), "cat": cat}
                 n += 1
             per_cat += n
             print(f"[{cat}] стр.{page}: новых {n}")
@@ -286,11 +288,11 @@ def item_data(sess, path):
     title = ""
     m = re.search(r"^#\s+(.+)$", md, re.M)
     if m:
-        title = scrub(m.group(1))
+        title = scrub(no_links(m.group(1)))
     if not title:
         m = re.search(r"^#{1,3}\s+(.+)$", md, re.M)
         if m:
-            title = scrub(m.group(1))
+            title = scrub(no_links(m.group(1)))
 
     price = ""
     m = PRICE_RE.search(md[:1200])
@@ -315,46 +317,77 @@ def item_data(sess, path):
     place = scrub(" ".join(parts)).replace("|", "·")[:80]
 
     desc = ""
-    m = re.search(r"##\s*Նկարագրություն\s*\n+(.+?)(?:\n+\s*Տեղադրված է|\Z)", md, re.S)
-    if m:
-        desc = scrub(" ".join(m.group(1).split()))
+    m2 = re.search(r"##\s*Նկարագրություն\s*\n+(.+?)(?:\n+\s*Տեղադրված է|\Z)", md, re.S)
+    if m2:
+        desc = scrub(" ".join(m2.group(1).split()))
+        desc = no_links(desc)
 
     posted = ""
-    m = re.search(r"Տեղադրված է\s*(\d{2}\.\d{2}\.\d{4})", md)
-    if m:
-        posted = m.group(1)
+    m3 = re.search(r"Տեղադրված է\s*(\d{2}\.\d{2}\.\d{4})", md)
+    if m3:
+        posted = m3.group(1)
 
     updated = ""
-    m = re.search(r"Թարմացվել է\s*(\d{2}\.\d{2}\.\d{4})", md)
-    if m:
-        updated = m.group(1)
+    m4 = re.search(r"Թարմացվել է\s*(\d{2}\.\d{2}\.\d{4})", md)
+    if m4:
+        updated = m3 and m4.group(1) or m4.group(1)
+
+    specs = []
+    for line in md.split("\n"):
+        s = scrub(line)
+        if not s or len(s) > 90 or s.startswith("#") or s.startswith("["):
+            continue
+        mm = SPEC_RE.match(s)
+        if not mm:
+            continue
+        k, v = scrub(mm.group(1)), scrub(no_links(mm.group(2)))
+        if not v or len(v) > 60:
+            continue
+        if "http" in v.lower() or "igma.am" in v.lower():
+            continue
+        if "Տեղադրված" in v or "Թարմացվել" in v:
+            continue
+        if k in ("Գործակալություն", "Անհատ", "Igma.am"):
+            continue
+        specs.append((k, v))
+        if len(specs) >= 6:
+            break
+
+    phone = ""
+    pm = PHONE_RE.search(md)
+    if pm:
+        phone = " ".join(pm.group(0).split())
 
     photos = []
-    for m in IMG_RE.finditer(md):
-        u = m.group(1)
-        if "logo" in u or "promo" in u:
-            continue
-        if "r2.dev" in u or "/storage/ads/" in u:
-            if u not in photos:
-                photos.append(u)
+    for m5 in IMG_RE.finditer(md):
+        u = m2.group(1) if False else m2 and None
+    photos = [u for u in [mm.group(1) for mm in IMG_RE.finditer(md)]
+              if "logo" not in u and "promo" not in u
+              and ("r2.dev" in u or "/storage/ads/" in u)]
+    dedup = []
+    for u in photos:
+        if u not in dedup:
+            dedup.append(u)
+    photos = dedup
 
     print(f"  {path}: նկար {len(photos)}, «{title[:40]}», «{price}», "
-          f"նկարագրություն {len(desc)}, թարմացված «{updated}»")
+          f"նկարագրություն {len(desc)}, թարմացված «{updated}», բնութագիր {len(specs)}")
 
     return {"title": title, "price": price, "desc": desc, "place": place,
             "photos": photos[:10], "posted": posted, "updated": updated,
+            "specs": specs, "phone": phone,
             "date": updated or posted, "url": BASE + path}
 
 # ---------- տեքստ ----------
 
 def headline(sess, d):
-    src = scrub(d.get("title") or "")
-    t = scrub(translate(sess, src)) if src else ""
+    src = scrub(no_links(d.get("title") or ""))
+    t = scrub(no_links(translate(sess, src))) if src else ""
     if src and (is_translit_hy(src) or is_translit_hy(t)):
         return ""
     if t and not re.search(r"(?:ться|тись)$", t.lower()) and (has_cyr(t) or script(t) == "lat"):
         return " ".join(t.split())[:90]
-    alt = scrub(translate(sess, (d.get("desc") or "")[:300]))
+    alt = scrub(no_links(translate(sess, (d.get("desc") or "")[:300])))
     if has_cyr(alt) and len(alt.split()) >= 3:
         return " ".join(re.split(r"[.!?]\s", alt)[0].split())[:90]
     if t and (has_cyr(t) or script(t) == "lat"):
@@ -362,18 +395,36 @@ def headline(sess, d):
     return " ".join((t or alt).split())[:90]
 
 def make_caption(sess, d):
-    head = headline(sess, d)
-    if not head:
-        head = HEAD_FALLBACK
-    lines = [head]
+    head = no_links(headline(sess, d)) or HEAD_FALLBACK
+    parts = [head]
+
     if d.get("price"):
-        lines.append(d["price"])
+        p = money(d["price"])
+        if p:
+            parts.append("Գին՝ " + p)
+
     if d.get("place"):
-        lines.append(scrub(translate(sess, d["place"]))[:80])
+        place = no_links(translate(sess, d["place"]))
+        if place:
+            parts.append("Տեղ՝ " + place[:80])
+
+    for k, v in (d.get("specs") or [])[:6]:
+        kk = no_links(translate(sess, k))
+        vv = no_links(translate(sess, v))
+        if kk and vv:
+            parts.append(f"{kk}՝ {vv}"[:90])
+
+    if d.get("phone"):
+        parts.append("Հեռախոս՝ " + d["phone"])
+
+    body = "\n".join(parts)
+
     if d.get("desc"):
-        lines.append(scrub(translate(sess, d["desc"][:700])))
-    lines = [" ".join(scrub(x).split()) for x in lines if x]
-    return "\n\n".join(lines)[:1024]
+        desc = no_links(translate(sess, d["desc"][:600]))
+        if desc and len(body) + len(desc) + 2 <= 1000:
+            body = body + "\n\n" + desc
+
+    return body[:1024]
 
 def fp_key(d, date):
     t = " ".join([d.get("title") or "", d.get("price") or "", date or ""]).lower()
@@ -476,19 +527,19 @@ def norm_queue(st):
                 iid = mm.group(1) if mm else p
             q.append({"id": iid, "path": p, "date": e.get("date", ""),
                       "price": e.get("price", ""), "place": e.get("place", ""),
-                      "photo": e.get("photo", "")})
+                      "photo": e.get("photo", ""), "cat": e.get("cat", "")})
         elif isinstance(e, str):
             p = e.split("]")[0].split(")")[0]
             mm = ITEM_ID_RE.search(p)
             q.append({"id": mm.group(1) if mm else p, "path": p, "date": "",
-                      "price": "", "place": "", "photo": ""})
+                      "price": "", "place": "", "photo": "", "cat": ""})
     st["queue"] = q
 
 def trim(st):
     while len(st["queue"]) > QUEUE_MAX:
         gone = st["queue"].pop(0)
         st["seen"][gone["path"]] = True
-        print("առաստաղ. գլխից դուրս եկավ:", gone["path"])
+        print("առաստեղ. գլխից դուրս եկավ:", gone["path"])
     if len(st["published"]) > 50000:
         keys = list(st["published"])[-20000:]
         st["published"] = {k: st["published"][k] for k in keys}
@@ -504,7 +555,6 @@ def trim(st):
 # ---------- հրապարակում ----------
 
 def publish_one(sess, st, e, now):
-    """Մեկ փորձ։ 'ok' | 'skip' | 'drop' | 'dropcard' | 'hold' | 'fail'."""
     path = e["path"]
     iid = e.get("id") or ""
 
@@ -560,7 +610,6 @@ def publish_one(sess, st, e, now):
     return "fail"
 
 def publish_phase(sess, st, now, limit=1):
-    """Հերթի գլխից՝ FIFO։ Գլխից ոչինչ չի հանվում առանց հրապարակվելու։"""
     done, tried = 0, 0
     while st["queue"] and done < limit and tried < MAX_TRIES:
         e = st["queue"].pop(0)
@@ -583,7 +632,6 @@ def publish_phase(sess, st, now, limit=1):
 # ---------- թարմացումներ ----------
 
 def recheck(sess, st, deadline):
-    """Հրապարակվածներից 30-ին բացում ենք. թարմացածը գնում է հերթի պոչ։"""
     watch = st.get("watch") or []
     if not watch:
         return 0
@@ -604,10 +652,11 @@ def recheck(sess, st, deadline):
             st["queue"].append({"id": path.rsplit("/", 1)[-1], "path": path,
                                 "date": d["date"], "price": d.get("price", ""),
                                 "place": d.get("place", ""),
-                                "photo": (d.get("photos") or [""])[0]})
+                                "photo": (d.get("photos") or [""])[0],
+                                "cat": ""})
             queued.add(path)
             added += 1
-            print("  թարմացածը հերթում է:", path, d["date"])
+            print("  թարմացվածը հերթում է:", path, d["date"])
     trim(st)
     print("թարմացումների ստուգում. նորերը՝", added, "| հերթ:", len(st["queue"]))
     save(st)
@@ -628,34 +677,40 @@ def main():
     now = time.time()
     deadline = now + MAX_SECONDS
 
-    # 1. Հրապարակում հավաքված հերթից
     done = publish_phase(sess, st, now, MAX_POSTS)
     save(st)
 
-    # 2. Հավաքում՝ վերջին 60 օրը
     items = get_items(sess, st, deadline)
     print("всего найдено:", len(items))
 
-    ok_dates = last_days(FRESH_DAYS)
     in_queue = {e["path"] for e in st["queue"]}
-    fresh = []
+    by_cat = {}
     for path, it in items.items():
         if path in st["seen"] or path in st["published"] or path in in_queue:
             continue
-        fresh.append({"id": it["id"], "path": path, "date": it.get("date", ""),
-                      "price": it.get("price", ""), "place": "",
-                      "photo": it.get("photo", "")})
+        by_cat.setdefault(it.get("cat", ""), []).append({
+            "id": it["id"], "path": path, "date": it.get("date", ""),
+            "price": it.get("price", ""), "place": "",
+            "photo": it.get("photo", ""), "cat": it.get("cat", "")})
+
+    fresh = []
+    order = list(by_cat)
+    i = 0
+    while order and any(by_cat[c] for c in order):
+        c = order[i % len(order)]
+        if by_cat[c]:
+            fresh.append(by_cat[c].pop(0))
+        i += 1
+
     if fresh:
         st["queue"].extend(fresh)
         print("новых в очередь:", len(fresh))
     trim(st)
     save(st)
 
-    # 3. Թարմացումների ստուգում
     if time.time() < deadline:
         recheck(sess, st, deadline)
 
-    # 4. Եթե այս վազքում դեռ ոչինչ դուրս չի եկել՝ փորձում ենք նորից
     if done < MAX_POSTS and st["queue"]:
         done += publish_phase(sess, st, time.time(), MAX_POSTS - done)
 
