@@ -12,7 +12,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: baraxolka
+  group: bot
   cancel-in-progress: false
 
 jobs:
@@ -48,7 +48,7 @@ jobs:
             if [ -f "$f" ]; then git add "$f"; fi
           done
           git diff --cached --quiet || git commit -m "state $(date -u +%Y-%m-%dT%H:%M)"
-          for i in 1 2 3; do
+          for i in 1 2 3 4 5; do
             git pull --rebase --autostash -q || true
             if git push; then break; fi
             sleep 5
