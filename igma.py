@@ -4,8 +4,9 @@ igma.am -> Telegram («Բարախոլկա Երևան»).
 
  - միայն վաճառքի բաժիններ. բացառված են անշարժ գույքը, աշխատանքը,
    ծառայությունները, տրանսպորտը, ավտոմեքենաները, վարձույթը
- - մեկ անգամ հրապարակվածը չի կրկնվում
- - նկարները միայն այդ հայտարարությունից, ոչ «նմանատիպերից»
+ - «նմանատիպ հայտարարություններ» բլոկը կտրվում է, ուստի ուրիշի
+   մեքենաներն ու նկարները չեն խառնվում
+ - հերթը մեկ անգամ մաքրվում է հին՝ մինչև արգելքը հավաքված հայտարարություններից
  - տեքստում հղում կամ էջի պիտակ չի մնում
 """
 import os
@@ -40,6 +41,7 @@ MAX_POSTS   = 1
 SEND_TRIES  = 3
 MAXP        = 9 * 1024 * 1024
 EXCLUDE_V   = 5
+RESET_V     = "reset_v5"
 
 BASE        = "https://igma.am"
 GROUP_BOOST = "https://t.me/boost/erevan03_baraxolka"
@@ -64,7 +66,7 @@ CANDIDATES = ("cat-200", "cat-400", "cat-500", "cat-600", "cat-700", "cat-800",
               "cat-900", "cat-1000", "cat-2000", "cat-3000", "cat-4000",
               "cat-5000", "cat-6000", "cat-7000", "cat-8000", "cat-9000")
 
-EXCLUDE = ("անշարժ", "աշխատանք", "ծառայութ", "տրանսպորտ", "վարձույթ",
+EXCLUDE = ("анշարժ", "աշխատանք", "ծառայութ", "տրանսպորտ", "վարձույթ",
            "недвижим", "работ", "услуг", "транспорт", "авто", "машин",
            "аренд", "прокат", "բոլոր")
 
@@ -104,6 +106,13 @@ def clean(text):
 def junk(text):
     low = (text or "").lower()
     return any(b in low for b in BAD)
+
+def cut_similar(md):
+    for s in SIM:
+        cut = md.find(s)
+        if cut > 0:
+            md = md[:cut]
+    return md
 
 def money(price):
     m = re.match(r"([\d\s.,]+)\s*(֏|\$|€)?", scrub(price))
@@ -249,6 +258,7 @@ def get_items(sess, st, deadline):
             md = fetch(sess, url)
             if not md:
                 break
+            md = cut_similar(md)
             n = 0
             for m in CARD_RE.finditer(md):
                 path = "/ads/" + m.group(3)
@@ -282,10 +292,7 @@ def item_data(sess, path):
     if not md:
         return None
 
-    for s in SIM:
-        cut = md.find(s)
-        if cut > 0:
-            md = md[:cut]
+    md = cut_similar(md)
 
     title = ""
     m = re.search(r"Title\W{0,3}\s*(.+)", md)
@@ -312,7 +319,11 @@ def item_data(sess, path):
         parts = [p.strip() for p in re.split(r"[—–]", clean(m.group(1))) if p.strip()]
         if parts:
             place = " — ".join(parts[:2])[:60]
-    if junk(place) or "2026" in place:
+    if not place or place in ("-", "—", "(") or re.fullmatch(r"[\W\d_]+", place):
+        place = ""
+    if re.search(r"[A-Za-z]{2,}\s*\d", place):
+        place = ""
+    if len(place) < 3:
         place = ""
 
     desc = ""
@@ -597,6 +608,12 @@ def main():
     st.setdefault("seen", {})
     st.setdefault("fps", {})
     norm_queue(st)
+
+    if not st.get(RESET_V):
+        st["queue"] = []
+        st[RESET_V] = True
+        save(st)
+        print("հերթը մաքրվեց. նորից կլցվի միայն թույլատրված բաժիններից")
 
     sess = requests.Session()
     now = time.time()
