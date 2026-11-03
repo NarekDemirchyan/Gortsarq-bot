@@ -336,31 +336,50 @@ def item_data(sess, path):
 def make_caption(sess, d):
     head = clean(translate(sess, d.get("title") or ""))
     if not head or len(head) < 6:
-        head = clean(translate(sess, (d.get("desc") or "")[:140]))
+        head = clean(translate(sess, (d.get("desc") or "")[:120]))
     head = head[:90]
 
-    lines = []
-    if head:
-        lines.append(head)
+    meta = []
     if d.get("price"):
         p = money(d["price"])
         if p:
-            lines.append("Գին՝ " + p)
+            meta.append("Գին՝ " + p)
     if d.get("place"):
         pl = clean(translate(sess, d["place"]))
         if pl:
-            lines.append("Տեղ՝ " + pl[:60])
+            meta.append("Տեղ՝ " + pl[:60])
     if d.get("phone"):
-        lines.append("Հեռախոս՝ " + d["phone"])
+        meta.append("Հեռախոս՝ " + d["phone"])
 
-    body = "\n".join(l for l in lines if l and not junk(l))
+    desc = clean(translate(sess, (d.get("desc") or "")[:300]))
+    if head and desc.lower().startswith(head.lower()[:25]):
+        desc = desc[len(head):].strip(" .,-")
+    if head and head.lower().strip(" .") == desc.lower().strip(" ."):
+        desc = ""
 
-    desc = clean(translate(sess, (d.get("desc") or "")[:400]))
-    if desc and desc != head and len(body) + len(desc) < 950:
-        body = (body + "\n\n" + desc).strip()
+    blocks = []
+    if head:
+        blocks.append(head)
+    if meta:
+        blocks.append("\n".join(meta))
+    if desc:
+        lines, cur = [], ""
+        for s in re.split(r"(?<=[.!?])\s+", desc):
+            if cur and len(cur) + len(s) > 120:
+                lines.append(cur)
+                cur = s
+            else:
+                cur = (cur + " " + s).strip()
+        if cur:
+            lines.append(cur)
+        blocks.append("\n".join(lines))
 
-    out = [l for l in body.split("\n") if l.strip() and not junk(l)]
-    return "\n".join(out)[:1024]
+    out = []
+    for b in blocks:
+        b = "\n".join(l for l in b.split("\n") if l.strip() and not junk(l))
+        if b.strip():
+            out.append(b.strip())
+    return "\n\n".join(out)[:1024]
 
 def tg_post(sess, method, data, files=None, timeout=90):
     for attempt in range(SEND_TRIES):
