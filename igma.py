@@ -2,18 +2,11 @@
 """
 igma.am -> Telegram («Բարախոլկա Երևան»).
 
-Կառուցված է գործարք կայքի մոդուլի նույն ձևով, նույն սահմաններով.
- 1. Հրապարակում ենք հերթի գլխից՝ FIFO. գլխից ոչինչ չի հանվում առանց հրապարակվելու
-    (երկու բացառությամբ՝ չընթերցվող քարտ, անտեքստ հայտարարություն)։
- 2. Հավաքում ենք վերջին 60 օրվա հայտարարությունները ու դնում հերթի պոչ։
- 3. Առաստաղը լցվելիս գլխից դուրս է գալիս ամենահինը, նորը մտնում է։
- 4. Տարբերությունը գործարքից. այստեղ կա «Թարմացվել է» ամսաթիվը, ուստի
-    թարմացված հայտարարությունը ամեն վազքում նորից մտնում է հերթի պոչ։
- 5. Կայքը չբացվելիս ոչինչ չի փոխվում՝ ոչ հրապարակում, ոչ դուրսգրում։
- 6. Հերթի պոչը լցվում է բաժինների միջև հերթով (round-robin)։
-
-Բացառված են անշարժ գույքը, աշխատանքը, ծառայությունները և տրանսպորտը։
-Բաժինների համարները կայքից ենք ճանաչում ըստ վերնագրի, ոչ թե գուշակում։
+ 1. Հրապարակում հերթի գլխից՝ FIFO։
+ 2. Հավաքում վերջին 60 օրվա հայտարարությունները, դնում պոչ։
+ 3. Մեկ անգամ հրապարակվածը չի կրկնվում։
+ 4. Տեքստում հղում, աստղանիշ կամ backtick չի մնում՝ միայն կոճակը։
+ 5. Հերթի պոչը լցվում է բաժինների միջև հերթով։
 """
 import os
 import re
@@ -51,7 +44,7 @@ SEND_TRIES  = 3
 WATCH_K     = 30
 MAXP        = 9 * 1024 * 1024
 
-EXCLUDE_V   = 2
+EXCLUDE_V   = 3
 
 BASE        = "https://igma.am"
 GROUP_BOOST = "https://t.me/boost/erevan03_baraxolka"
@@ -78,17 +71,17 @@ CANDIDATES = ("cat-200", "cat-400", "cat-500", "cat-600", "cat-700", "cat-800",
               "cat-5000", "cat-6000", "cat-7000", "cat-8000", "cat-9000",
               "cat-10000")
 
-# անշարժ գույք, աշխատանք, ծառայություններ, տրանսպորտ, «բոլոր հայտարարությունները»
 EXCLUDE = ("անշարժ", "աշխատանք", "ծառայութ", "տրանսպորտ", "транспорт", "բոլոր")
 
 CARD_RE  = re.compile(r"\[!\[[^\]]*\]\(([^)]+)\)\]\((https://igma\.am/(?:[a-z]{2}/)?ads/(\d+))\)")
 PRICE_RE = re.compile(r"([\d][\d\s ]{0,12})\s*(֏|\$|€)")
 IMG_RE   = re.compile(r"!\[[^\]]*\]\((https?://[^)]+)\)")
 ITEM_ID_RE = re.compile(r"/ads/(\d+)")
-PHONE_RE = re.compile(r"(?:\+374|0)\s?\d{2}[\s\-]?\d{2}[\s\-]?\d{2}[\s\-]?\d{2}")
-SPEC_RE  = re.compile(r"^([^:\n]{2,30}):\s*(.+)$")
+SPEC_RE  = re.compile(r"^([^:]{2,30}):\s*(.+)$")
 
 HEAD_FALLBACK = "Գովազդ"
+
+JUNK_KEYS = ("информация", "размещено", "обновлено", "категория", "статус")
 
 def scrub(text):
     t = " ".join((text or "").split())
@@ -96,11 +89,24 @@ def scrub(text):
     t = re.sub(r"^[\s,.;:!?\-]+", "", t)
     return t.strip(" ,.;:!?-\"")
 
-def no_links(text):
+def clean(text):
+    """Մաքրում է հղումները, աստղանիշները, backtick-ը և ավելորդ նշանները։"""
     t = text or ""
-    t = re.sub(r"\[([^\]]*)\]\((https?://[^)]*)\)", r"\1", t)
-    t = re.sub(r"\b(?:https?://|www\.)\S+", "", t)
-    t = re.sub(r"\bigma\.am\b", "", t, flags=re.I)
+    for sep in ("](", "] ("):
+        guard = 0
+        while sep in t and guard < 50:
+            guard += 1
+            i = t.index(sep)
+            j = t.find(")", i)
+            if j == -1:
+                t = t[:i]
+                break
+            t = t[:i] + " " + t[j + 1:]
+    t = t.replace("[", " ").replace("]", " ")
+    t = t.replace("**", " ").replace("`", " ").replace("_", " ")
+    words = [w for w in t.split() if not w.lower().startswith(("http", "www."))]
+    t = " ".join(words)
+    t = t.replace("igma.am", " ")
     return scrub(t)
 
 def money(price):
@@ -108,7 +114,7 @@ def money(price):
     m = re.match(r"([\d\s.,]+)\s*(֏|\$|€)?", t)
     if not m:
         return ""
-    digits = re.sub(r"[^\d]", "", m.group(1))
+    digits = "".join(ch for ch in m.group(1) if ch.isdigit())
     if not digits:
         return ""
     num = "{:,}".format(int(digits)).replace(",", " ")
@@ -231,7 +237,6 @@ def photo_bytes(sess, url, ref):
 # ---------- բաժիններ ----------
 
 def cats(sess, st):
-    """Կայքից ճանաչում ենք բաժինները՝ ըստ վերնագրի, և թողնում վաճառքը։"""
     if st.get("cats") and st.get("exclude_v") == EXCLUDE_V:
         return st["cats"]
     found = []
@@ -259,7 +264,7 @@ def cats(sess, st):
 # ---------- հավաքում ----------
 
 def list_url(cat, page):
-    u = "https://igma.am/listings?category=%s" % cat
+    u = "%s/listings?category=%s" % (BASE, cat)
     return u if page == 1 else u + "&page=%d" % page
 
 def get_items(sess, st, deadline):
@@ -296,6 +301,16 @@ def get_items(sess, st, deadline):
 
 # ---------- քարտ ----------
 
+def find_phone(md):
+    """Հեռախոսը վերցնում ենք միայն այն տողից, որտեղ բառ կա՝ հեռախոս/телефон։"""
+    for line in md.split("\n"):
+        low = line.lower()
+        if "եռախոս" in line or "телефон" in low:
+            digits = "".join(ch for ch in line if ch.isdigit() or ch == "+")
+            if len(digits) >= 8:
+                return digits
+    return ""
+
 def item_data(sess, path):
     md = fetch(sess, BASE + path)
     if not md:
@@ -308,11 +323,11 @@ def item_data(sess, path):
     title = ""
     mt = re.search(r"^#\s+(.+)$", md, re.M)
     if mt:
-        title = no_links(mt.group(1))
+        title = clean(mt.group(1))
     if not title:
         mt = re.search(r"^#{1,3}\s+(.+)$", md, re.M)
         if mt:
-            title = no_links(mt.group(1))
+            title = clean(mt.group(1))
 
     price = ""
     mp = PRICE_RE.search(md[:1200])
@@ -324,22 +339,26 @@ def item_data(sess, path):
     tail = md[mp.end():mp.end() + 500] if mp else md[:1000]
     parts = []
     for line in tail.split("\n"):
-        low = scrub(line)
-        if not low or low.startswith("#") or low.startswith("["):
+        low = clean(line)
+        if not low or low.startswith("#"):
             continue
-        if low.startswith("Տեղադրված") or low.startswith("Թարմացվել"):
-            break
-        if low in ("Գործակալություն", "Անհատ", "Igma.am"):
+        if low.lower().startswith(JUNK_KEYS):
+            continue
+        if "եռախոս" in low or "телефон" in low.lower():
             continue
         parts.append(low)
-        if len(parts) >= 3:
+        if len(parts) >= 2:
             break
-    place = no_links(" ".join(parts)).replace("|", "·")[:80]
+    place = clean(" ".join(parts)).replace("|", "·")[:80]
+    if "2026" in place or "20" + "2" in place[:3]:
+        place = ""
+    if "елефон" in place.lower() or "եռախոս" in place:
+        place = ""
 
     desc = ""
     mdsc = re.search(r"##\s*Նկարագրություն\s*\n+(.+?)(?:\n+\s*Տեղադրված է|\Z)", md, re.S)
     if mdsc:
-        desc = no_links(" ".join(mdsc.group(1).split()))
+        desc = clean(" ".join(mdsc.group(1).split()))
 
     posted = ""
     mpo = re.search(r"Տեղադրված է\s*(\d{2}\.\d{2}\.\d{4})", md)
@@ -353,34 +372,28 @@ def item_data(sess, path):
 
     specs = []
     for line in md.split("\n"):
-        s = scrub(line)
-        if not s or len(s) > 90 or s.startswith("#") or s.startswith("["):
+        s = clean(line)
+        if not s or len(s) > 90 or s.startswith("#"):
             continue
         msm = SPEC_RE.match(s)
         if not msm:
             continue
-        k = scrub(msm.group(1))
-        v = no_links(msm.group(2))
+        k = clean(msm.group(1))
+        v = clean(msm.group(2))
         if not v or len(v) > 60:
             continue
-        if "http" in v.lower() or "igma.am" in v.lower():
+        if k.lower().startswith(JUNK_KEYS):
             continue
-        if k in ("Գործակալություն", "Անհատ", "Igma.am"):
+        if "елефон" in k.lower() or "եռախոս" in k:
             continue
-        if len(k) > 28 or v in ("Տեղադրված", "Թարմացվել"):
+        if v.lower().startswith(("http", "www.")):
             continue
         specs.append((k, v))
-        if len(specs) >= 6:
+        if len(specs) >= 5:
             break
 
-    phone = ""
-    mph = PHONE_RE.search(md)
-    if mph:
-        phone = " ".join(mph.group(0).split())
+    phone = find_phone(md)
 
-    photos = []
-    for mi in IMG_RE.finditer(md):
-        u = m.group(1) if False else None
     photos = []
     for mi in IMG_RE.finditer(md):
         u = mi.group(1)
@@ -401,13 +414,13 @@ def item_data(sess, path):
 # ---------- տեքստ ----------
 
 def headline(sess, d):
-    src = no_links(d.get("title") or "")
-    t = no_links(translate(sess, src)) if src else ""
+    src = clean(d.get("title") or "")
+    t = clean(translate(sess, src)) if src else ""
     if src and (is_translit_hy(src) or is_translit_hy(t)):
         return ""
     if t and not re.search(r"(?:ться|тись)$", t.lower()) and (has_cyr(t) or script(t) == "lat"):
         return " ".join(t.split())[:90]
-    alt = no_links(translate(sess, (d.get("desc") or "")[:300]))
+    alt = clean(translate(sess, (d.get("desc") or "")[:300]))
     if has_cyr(alt) and len(alt.split()) >= 3:
         return " ".join(re.split(r"[.!?]\s", alt)[0].split())[:90]
     if t and (has_cyr(t) or script(t) == "lat"):
@@ -415,8 +428,7 @@ def headline(sess, d):
     return " ".join((t or alt).split())[:90]
 
 def make_caption(sess, d):
-    head = no_links(headline(sess, d)) or HEAD_FALLBACK
-    parts = [head]
+    parts = [clean(headline(sess, d)) or HEAD_FALLBACK]
 
     if d.get("price"):
         p = money(d["price"])
@@ -424,15 +436,15 @@ def make_caption(sess, d):
             parts.append("Գին՝ " + p)
 
     if d.get("place"):
-        place = no_links(translate(sess, d["place"]))
-        if place:
+        place = clean(translate(sess, d["place"]))
+        if place and len(place) > 2:
             parts.append("Տեղ՝ " + place[:80])
 
-    for k, v in (d.get("specs") or [])[:6]:
-        kk = no_links(translate(sess, k))
-        vv = no_links(translate(sess, v))
+    for k, v in (d.get("specs") or [])[:5]:
+        kk = clean(translate(sess, k))
+        vv = clean(translate(sess, v))
         if kk and vv:
-            parts.append(f"{kk}՝ {vv}"[:90])
+            parts.append((kk + "՝ " + vv)[:80])
 
     if d.get("phone"):
         parts.append("Հեռախոս՝ " + d["phone"])
@@ -440,11 +452,16 @@ def make_caption(sess, d):
     body = "\n".join(parts)
 
     if d.get("desc"):
-        desc = no_links(translate(sess, d["desc"][:600]))
+        desc = clean(translate(sess, d["desc"][:500]))
         if desc and len(body) + len(desc) + 2 <= 1000:
             body = body + "\n\n" + desc
 
-    return body[:1024]
+    out = []
+    for line in body.split("\n"):
+        line = clean(line)
+        if line:
+            out.append(line)
+    return "\n".join(out)[:1024]
 
 def fp_key(d, date):
     t = " ".join([d.get("title") or "", d.get("price") or "", date or ""]).lower()
@@ -578,6 +595,9 @@ def publish_one(sess, st, e, now):
     path = e["path"]
     iid = e.get("id") or ""
 
+    if st["published"].get(path):
+        return "skip"
+
     d = None
     try:
         d = item_data(sess, path)
@@ -602,10 +622,6 @@ def publish_one(sess, st, e, now):
         print("  հին հայտարարություն, դուրս ենք գցում:", iid, date)
         st["seen"][path] = True
         return "drop"
-
-    prev = st["published"].get(path)
-    if prev and dkey(date) <= dkey(prev):
-        return "skip"
 
     cap = make_caption(sess, d)
     if not cap:
@@ -697,11 +713,9 @@ def main():
     now = time.time()
     deadline = now + MAX_SECONDS
 
-    # 1. Հրապարակում հավաքված հերթից
     done = publish_phase(sess, st, now, MAX_POSTS)
     save(st)
 
-    # 2. Հավաքում՝ վերջին 60 օրը
     items = get_items(sess, st, deadline)
     print("всего найдено:", len(items))
 
@@ -730,11 +744,9 @@ def main():
     trim(st)
     save(st)
 
-    # 3. Թարմացումների ստուգում
     if time.time() < deadline:
         recheck(sess, st, deadline)
 
-    # 4. Եթե այս վազքում դեռ ոչինչ դուրս չի եկել՝ փորձում ենք նորից
     if done < MAX_POSTS and st["queue"]:
         done += publish_phase(sess, st, time.time(), MAX_POSTS - done)
 
