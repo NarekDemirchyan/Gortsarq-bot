@@ -4,9 +4,9 @@ igma.am -> Telegram («Բարախոլկա Երևան»).
 
  - միայն վաճառքի բաժիններ. բացառված են անշարժ գույքը, աշխատանքը,
    ծառայությունները, տրանսպորտը, ավտոմեքենաները, վարձույթը
- - «նմանատիպ հայտարարություններ» բլոկը կտրվում է, ուստի ուրիշի
-   մեքենաներն ու նկարները չեն խառնվում
- - հերթը մեկ անգամ մաքրվում է հին՝ մինչև արգելքը հավաքված հայտարարություններից
+ - «նմանատիպ հայտարարություններ» բլոկը կտրվում է
+ - ամեն վազքում ստուգվում են հրապարակվածները. նոր «Թարմացվել է»-ով
+   հայտարարությունը նորից մտնում է հերթ
  - տեքստում հղում կամ էջի պիտակ չի մնում
 """
 import os
@@ -39,6 +39,7 @@ MAX_PAGES   = 40
 MAX_TRIES   = 4
 MAX_POSTS   = 1
 SEND_TRIES  = 3
+WATCH_K     = 30
 MAXP        = 9 * 1024 * 1024
 EXCLUDE_V   = 5
 RESET_V     = "reset_v5"
@@ -66,7 +67,7 @@ CANDIDATES = ("cat-200", "cat-400", "cat-500", "cat-600", "cat-700", "cat-800",
               "cat-900", "cat-1000", "cat-2000", "cat-3000", "cat-4000",
               "cat-5000", "cat-6000", "cat-7000", "cat-8000", "cat-9000")
 
-EXCLUDE = ("анշարժ", "աշխատանք", "ծառայութ", "տրանսպորտ", "վարձույթ",
+EXCLUDE = ("անշարժ", "աշխատանք", "ծառայութ", "տրանսպորտ", "վարձույթ",
            "недвижим", "работ", "услуг", "транспорт", "авто", "машин",
            "аренд", "прокат", "բոլոր")
 
@@ -114,6 +115,13 @@ def cut_similar(md):
             md = md[:cut]
     return md
 
+def stamp_of(s):
+    m = re.search(r"(\d{2})\.(\d{2})\.(\d{4})(?:\D{0,3}(\d{2}):(\d{2}))?", s or "")
+    if not m:
+        return (0, 0, 0, 0, 0)
+    return (int(m.group(3)), int(m.group(2)), int(m.group(1)),
+            int(m.group(4) or 0), int(m.group(5) or 0))
+
 def money(price):
     m = re.match(r"([\d\s.,]+)\s*(֏|\$|€)?", scrub(price))
     if not m:
@@ -125,13 +133,6 @@ def money(price):
 
 def today_str():
     return time.strftime("%d.%m.%Y", time.gmtime(time.time() + 4 * 3600))
-
-def dkey(date):
-    try:
-        d, m, y = [int(x) for x in (date or "").split(".")]
-        return (y, m, d)
-    except Exception:
-        return (0, 0, 0)
 
 def last_days(n):
     out = set()
@@ -319,15 +320,33 @@ def item_data(sess, path):
         parts = [p.strip() for p in re.split(r"[—–]", clean(m.group(1))) if p.strip()]
         if parts:
             place = " — ".join(parts[:2])[:60]
-    if not place or place in ("-", "—", "(") or re.fullmatch(r"[\W\d_]+", place):
+    if not place or len(place) < 3 or re.fullmatch(r"[\W\d_]+", place):
         place = ""
     if re.search(r"[A-Za-z]{2,}\s*\d", place):
         place = ""
-    if len(place) < 3:
-        place = ""
+
+    posted = ""
+    mpo = re.search(r"Տեղադրվ(?:ած|ել) է\D{0,3}(\d{2}\.\d{2}\.\d{4})(?:\D{0,3}(\d{2}:\d{2}))?", md)
+    if mpo:
+        posted = mpo.group(1) + (" " + mpo.group(2) if mpo.group(2) else "")
+    if not posted:
+        mpo = re.search(r"Размещено\D{0,3}(\d{2}\.\d{2}\.\d{4})(?:\D{0,3}(\d{2}:\d{2}))?", md)
+        if mpo:
+            posted = mpo.group(1) + (" " + mpo.group(2) if mpo.group(2) else "")
+
+    updated = ""
+    mu = re.search(r"Թարմացվել է\D{0,3}(\d{2}\.\d{2}\.\d{4})(?:\D{0,3}(\d{2}:\d{2}))?", md)
+    if mu:
+        updated = mu.group(1) + (" " + mu.group(2) if mu.group(2) else "")
+    if not updated:
+        mu = re.search(r"Обновлено\D{0,3}(\d{2}\.\d{2}\.\d{4})(?:\D{0,3}(\d{2}:\d{2}))?", md)
+        if mu:
+            updated = mu.group(1) + (" " + mu.group(2) if mu.group(2) else "")
+
+    stamp = updated or posted
 
     desc = ""
-    m = re.search(r"Նկարագրություն\s*\n+(.+?)(?:\n\s*Տեղադրված է|\n\s*Թարմացվել է|\Z)",
+    m = re.search(r"Նկարագրություն\s*\n+(.+?)(?:\n\s*Տեղադրված է|\n\s*Տեղադրվել է|\n\s*Թարմացվել է|\Z)",
                   md, re.S)
     if m:
         desc = clean(" ".join(m.group(1).split()))
@@ -339,15 +358,6 @@ def item_data(sess, path):
                 best = s
         if len(best) > 20:
             desc = best
-
-    updated = ""
-    mu = re.search(r"(?:Թարմացվել է|Обновлено)\D{0,3}(\d{2}\.\d{2}\.\d{4})", md)
-    if mu:
-        updated = mu.group(1)
-    posted = ""
-    mpo = re.search(r"(?:Տեղադրված է|Размещено)\D{0,3}(\d{2}\.\d{2}\.\d{4})", md)
-    if mpo:
-        posted = mpo.group(1)
 
     photos = []
     names = set()
@@ -363,13 +373,13 @@ def item_data(sess, path):
             names.add(name)
             photos.append(u)
 
-    print("  %s: фото %d, «%s», «%s», опис %d"
-          % (path, len(photos), title[:40], price, len(desc)))
+    print("  %s: фото %d, «%s», «%s», опис %d, обн «%s»"
+          % (path, len(photos), title[:40], price, len(desc), updated))
 
     return {"title": title, "price": price, "desc": desc, "place": place,
             "phone": find_phone(md), "photos": photos[:10],
-            "posted": posted, "updated": updated,
-            "date": updated or posted, "url": BASE + path}
+            "posted": posted, "updated": updated, "stamp": stamp,
+            "date": updated[:10] or posted[:10], "url": BASE + path}
 
 def headline(sess, d):
     src = clean(d.get("title") or "")
@@ -431,13 +441,6 @@ def make_caption(sess, d):
             out.append(b.strip())
 
     return "\n\n".join(out)[:1024] or ""
-
-def fp_key(d, date):
-    t = " ".join([d.get("title") or "", d.get("price") or "", date or ""]).lower()
-    h = 0
-    for ch in " ".join(t.split()):
-        h = (h * 131 + ord(ch)) % 1000000007
-    return "fp%d" % h
 
 def tg_post(sess, method, data, files=None, timeout=90):
     for attempt in range(SEND_TRIES):
@@ -510,7 +513,7 @@ def load():
             return json.load(open(STATE, encoding="utf-8"))
         except Exception as e:
             print("state-igma.json չի կարդացվում:", e)
-    return {"queue": [], "published": {}, "seen": {}, "fps": {}}
+    return {"queue": [], "published": {}, "seen": {}, "watch": [], "watch_pos": 0}
 
 def save(st):
     json.dump(st, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
@@ -537,13 +540,12 @@ def trim(st):
     if len(st["seen"]) > 50000:
         for k in list(st["seen"])[:20000]:
             st["seen"].pop(k, None)
+    if len(st["watch"]) > 5000:
+        st["watch"] = st["watch"][-3000:]
 
 def publish_one(sess, st, e, now):
     path = e["path"]
     iid = e.get("id") or ""
-
-    if st["published"].get(path):
-        return "skip"
 
     d = None
     try:
@@ -557,29 +559,25 @@ def publish_one(sess, st, e, now):
         st["seen"][path] = True
         return "dropcard"
 
+    prev = st["published"].get(path)
+    stamp = d.get("stamp") or ""
+    if prev and stamp_of(stamp) <= stamp_of(prev):
+        return "skip"
+
     if not d.get("price") and e.get("price"):
         d["price"] = e["price"]
     if not d.get("photos") and e.get("photo"):
         d["photos"] = [e["photo"]]
-
-    date = d.get("date") or e.get("date") or ""
-    if date and date not in last_days(FRESH_DAYS):
-        st["seen"][path] = True
-        return "drop"
 
     cap = make_caption(sess, d)
     if not cap.strip():
         st["seen"][path] = True
         return "drop"
 
-    k = fp_key(d, date)
-    if st["fps"].get(k):
-        st["seen"][path] = True
-        return "skip"
-
     if send(sess, d, cap):
-        st["published"][path] = date or today_str()
-        st["fps"][k] = date or today_str()
+        st["published"][path] = stamp or today_str()
+        if path not in st["watch"]:
+            st["watch"].append(path)
         led_add(SITE, iid, now)
         print("опубликовано: %s (%s) фото %d" % (iid, path, len(d.get("photos") or [])))
         return "ok"
@@ -602,11 +600,50 @@ def publish_phase(sess, st, now, limit=1):
             break
     return done
 
+def recheck(sess, st, deadline):
+    watch = st.get("watch") or []
+    if not watch:
+        return 0
+    pos = int(st.get("watch_pos", 0)) % len(watch)
+    picked = [watch[(pos + k) % len(watch)] for k in range(min(WATCH_K, len(watch)))]
+    st["watch_pos"] = (pos + len(picked)) % len(watch)
+
+    queued = set(x["path"] for x in st["queue"])
+    added = 0
+    for path in picked:
+        if time.time() > deadline:
+            break
+        if path in queued:
+            continue
+        d = None
+        try:
+            d = item_data(sess, path)
+        except Exception:
+            d = None
+        if not d:
+            continue
+        stamp = d.get("stamp") or ""
+        prev = st["published"].get(path) or ""
+        if stamp_of(stamp) > stamp_of(prev):
+            st["queue"].append({"id": path.rsplit("/", 1)[-1], "path": path,
+                                "date": (d.get("date") or ""),
+                                "price": d.get("price", ""),
+                                "photo": (d.get("photos") or [""])[0],
+                                "cat": ""})
+            queued.add(path)
+            added += 1
+            print("  թարմացվածը հերթում է:", path, stamp)
+        time.sleep(0.5)
+    print("թարմացումների ստուգում. նորերը՝ %d | հերթ: %d" % (added, len(st["queue"])))
+    save(st)
+    return added
+
 def main():
     st = load()
     st.setdefault("published", {})
     st.setdefault("seen", {})
-    st.setdefault("fps", {})
+    st.setdefault("watch", [])
+    st.setdefault("watch_pos", 0)
     norm_queue(st)
 
     if not st.get(RESET_V):
@@ -625,10 +662,12 @@ def main():
     items = get_items(sess, st, deadline)
     print("всего найдено:", len(items))
 
-    in_queue = set(e["path"] for e in st["queue"])
+    in_queue = set(x["path"] for x in st["queue"])
     by_cat = {}
     for path, it in items.items():
-        if path in st["seen"] or path in st["published"] or path in in_queue:
+        if path in st["seen"] or path in in_queue:
+            continue
+        if path in st["published"]:
             continue
         by_cat.setdefault(it.get("cat", ""), []).append(it)
 
@@ -647,6 +686,9 @@ def main():
 
     trim(st)
     save(st)
+
+    if time.time() < deadline:
+        recheck(sess, st, deadline)
 
     if done < MAX_POSTS and st["queue"]:
         done += publish_phase(sess, st, time.time(), MAX_POSTS - done)
