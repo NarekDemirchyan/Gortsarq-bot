@@ -4,7 +4,7 @@ igma.am -> Telegram («Բարախոլկա Երևան»).
 
  - միայն վաճառքի բաժիններ
  - «նմանատիպ հայտարարություններ» բլոկը կտրվում է
- - բնութագրերը տպվում են տողերով. «Վիճակ՝ …», «Մակնիշ՝ …»
+ - բնութագրերը կարդացվում են կայքի աղյուսակից՝ «Վիճակ՝ …» տողերով
  - նոր «Թարմացվել է»-ով հայտարարությունը նորից մտնում է հերթ
 """
 import os
@@ -30,14 +30,15 @@ JINA_KEY = os.environ.get("JINA_KEY", "")
 SITE        = "igma"
 STATE       = "state-igma.json"
 QUEUE_MAX   = 3000
-FRESH_DAYS  = 60
-PER_CAT     = 2000
-MAX_SECONDS = 1500
-MAX_PAGES   = 40
-MAX_TRIES   = 4
+FRESH_DAYS  = 730
+MAX_DAYS    = 400
+MAX_SECONDS = 300
+MAX_CAND    = 120
+SCAN_BUDGET = 60
+MAX_TRIES   = 2
 MAX_POSTS   = 1
-SEND_TRIES  = 3
-WATCH_K     = 30
+SEND_TRIES  = 2
+WATCH_K     = 20
 MAXP        = 9 * 1024 * 1024
 EXCLUDE_V   = 5
 RESET_V     = "reset_v5"
@@ -47,32 +48,27 @@ GROUP_BOOST = "https://t.me/boost/erevan03_baraxolka"
 
 HDRS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                   "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
-    "Accept-Language": "ru,hy;q=0.9,en;q=0.8",
+                   "(KHTML, like Gecko) Chrome/61.0.3163.100 Safari/537.36"),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "ru-RU,ru;q=0.9,hy;q=0.8,en;q=0.7",
 }
 
 BLOCKED = ("just a moment", "performing security verification", "checking your browser",
-           "enable javascript", "captcha", "are you a human", "cloudflare",
-           "attention required", "access denied", "ddos-guard")
-
-PROXIES = (
-    "https://api.allorigins.win/raw",
-    "https://api.codetabs.com/v1/proxy",
-    "https://corsproxy.io/?url=",
-)
+           "enable javascript", "cf-browser-verification", "attention required",
+           "access denied", "ddos-guard", "security check")
 
 CANDIDATES = ("cat-200", "cat-400", "cat-500", "cat-600", "cat-700", "cat-800",
               "cat-900", "cat-1000", "cat-2000", "cat-3000", "cat-4000",
               "cat-5000", "cat-6000", "cat-7000", "cat-8000", "cat-9000")
 
-EXCLUDE = ("անշարժ", "աշխատանք", "ծառայութ", "տրանսպորտ", "վարձույթ",
-           "недвижим", "работ", "услуг", "транспорт", "авто", "машин",
-           "аренд", "прокат", "բոլոր")
+EXCLUDE = ("անշարժ", "տրանսպորտ", "ավտոմեքենա", "աշխատանք", "ծառայություն",
+           "վարձույթ", "недвижим", "транспорт", "автомобил", "работа",
+           "услуг", "аренд", "прокат")
 
 SIM = ("Նմանատիպ", "Похожие", "Similar", "Այլ հայտարարություն", "Igma.am app")
 
 SPEC_HEAD = ("Ապրանքի մասին տեղեկատվություն", "Տեղեկատվություն ապրանքի",
-             "О товаре", "Характеристики")
+             "Տեխնիկական բնութագրեր", "О товаре", "Характеристики")
 
 CARD_RE  = re.compile(r"\[!\[[^\]]*\]\(([^)]+)\)\]\((https://igma\.am/(?:[a-z]{2}/)?ads/(\d+))\)")
 PRICE_RE = re.compile(r"([\d][\d\s ]{0,12})\s*(֏|\$|€)")
@@ -148,49 +144,20 @@ def good(text):
     low = text.lower()
     return not any(b in low for b in BLOCKED)
 
-def via_proxy(sess, proxy, url, headers, timeout):
-    if proxy.endswith("="):
-        return sess.get(proxy + urllib.parse.quote(url, safe=""),
-                        headers=headers, timeout=timeout)
-    return sess.get(proxy, params={"url": url}, headers=headers, timeout=timeout)
-
-_FAILS = [0]
-
 def fetch(sess, url):
-    if _FAILS[0] >= 8:
-        return ""
     try:
-        r = sess.get(url, headers=HDRS, timeout=15)
-        if r.status_code == 200 and good(r.text):
-            _FAILS[0] = 0
-            return to_md(r.text, url)
+        r = sess.get(url, headers=HDRS, timeout=12)
+        if r.status_code == 200:
+            t = to_md(r.text, url)
+            if t and len(t) > 600:
+                return t
     except Exception:
         pass
-    h = dict(HDRS)
-    h["x-engine"] = "browser"
-    if JINA_KEY:
-        h["Authorization"] = "Bearer " + JINA_KEY
-    try:
-        r = sess.get("https://r.jina.ai/" + url, headers=h, timeout=25)
-        if r.status_code == 200 and good(r.text):
-            _FAILS[0] = 0
-            return r.text
-    except Exception:
-        pass
-    for p in PROXIES[:2]:
-        try:
-            r = via_proxy(sess, p, url, HDRS, 20)
-            if r.status_code == 200 and good(r.text):
-                _FAILS[0] = 0
-                return to_md(r.text, url)
-        except Exception:
-            pass
-    _FAILS[0] += 1
     print("  չկարդացվեց:", url)
     return ""
 
 def site_up(sess):
-    return bool(fetch(sess, BASE + "/listings"))
+    return bool(fetch(sess, BASE + "/"))
 
 def img_ok(r):
     b = r.content or b""
@@ -199,93 +166,62 @@ def img_ok(r):
     return not b.lstrip()[:1] == b"<"
 
 def photo_bytes(sess, url, ref):
-    if _FAILS[0] >= 12:
-        return None
     h = dict(HDRS)
     h["Referer"] = ref or BASE + "/"
-    h["Accept"] = "image/avif,image/webp,image/jpeg,image/*,*/*;q=0.8"
+    h["Accept"] = "image/avif,image/webp,image/jpeg,image/png,*/*;q=0.8"
     try:
-        r = sess.get(url, headers=h, timeout=25)
+        r = sess.get(url, headers=h, timeout=15)
         if img_ok(r) and len(r.content) <= MAXP:
-            _FAILS[0] = 0
             return r.content
     except Exception:
         pass
-    bare = url.split("://", 1)[-1]
-    for p in ("https://images.weserv.nl/?url=" + bare,
-              "https://wsrv.nl/?url=" + bare):
-        try:
-            r = sess.get(p, headers=h, timeout=25)
-            if img_ok(r) and len(r.content) <= MAXP:
-                return r.content
-        except Exception:
-            pass
-    _FAILS[0] += 1
-    print("  նկարը չներբեռնվեց:", url)
     return None
 
-def cats(sess, st):
-    if st.get("cats") and st.get("exclude_v") == EXCLUDE_V:
+def get_cats(sess, st):
+    if st.get("cats"):
         return st["cats"]
-    found = []
-    for cat in CANDIDATES:
-        md = fetch(sess, "%s/listings?category=%s" % (BASE, cat))
-        if not md:
-            continue
-        m = re.search(r"^#\s*Igma\.am\s*[—–-]\s*(.+)$", md, re.M)
-        name = scrub(m.group(1)) if m else ""
-        if not name or any(x in name.lower() for x in EXCLUDE):
-            print("  %s՝ «%s» — բաց թողնված" % (cat, name))
-            continue
-        found.append(cat)
-        print("  %s՝ «%s»" % (cat, name))
-        time.sleep(1)
-    if not found:
-        found = ["cat-400", "cat-500", "cat-600"]
-    st["cats"] = found
-    st["exclude_v"] = EXCLUDE_V
-    save(st)
-    return found
+    return ["anon-1"]
+
+def listing_url(cat, page):
+    u = "%s/listings?category=%s" % (BASE, cat)
+    if page > 1:
+        u += "&page=%d" % page
+    return u
 
 def get_items(sess, st, deadline):
     found = {}
-    for cat in cats(sess, st):
+    for cat in get_cats(sess, st):
         per_cat = 0
-        for page in range(1, MAX_PAGES + 1):
+        for page in range(1, 21):
             if time.time() > deadline:
                 return found
-            url = "%s/listings?category=%s" % (BASE, cat)
-            if page > 1:
-                url += "&page=%d" % page
-            md = fetch(sess, url)
+            md = fetch(sess, listing_url(cat, page))
             if not md:
                 break
-            md = cut_similar(md)
             n = 0
             for m in CARD_RE.finditer(md):
                 path = "/ads/" + m.group(3)
                 if path in found:
                     continue
-                tail = md[m.end():m.end() + 400]
-                price = ""
+                tail = md[m.end():m.end() + 300]
                 pm = PRICE_RE.search(tail)
-                if pm:
-                    price = " ".join(pm.group(1).split()) + " " + pm.group(2)
-                found[path] = {"id": m.group(3), "path": path, "date": "",
-                               "price": price, "photo": m.group(1), "cat": cat}
+                price = (" ".join(pm.group(1).split()) + " " + pm.group(2)) if pm else ""
+                found[path] = {"id": m.group(3), "path": path,
+                               "price": price, "photo": m.group(1) or "",
+                               "cat": cat}
                 n += 1
             per_cat += n
-            print("[%s] стр.%d: новых %d" % (cat, page, n))
-            if n == 0 or per_cat >= PER_CAT:
+            print("[%s] էջ %d: նոր %d" % (cat, page, n))
+            if n == 0 or per_cat >= 5000:
                 break
-            time.sleep(1)
+            time.sleep(0.5)
     return found
 
 def find_phone(md):
     for line in md.split("\n"):
         if "եռախոս" in line or "телефон" in line.lower():
             digits = "".join(ch for ch in line if ch.isdigit() or ch == "+")
-            if len(digits) >= 8:
+            if 8 <= len(digits) <= 15:
                 return digits
     return ""
 
@@ -298,13 +234,18 @@ def get_specs(md):
             continue
         for line in m.group(1).split("\n"):
             s = clean(line)
-            if not s or len(s) > 80:
+            if not s or len(s) > 120:
                 continue
-            if ":" not in s and "՝" not in s:
-                continue
-            k, v = re.split(r"[:՝]", s, 1)
-            k, v = clean(k), clean(v)
+            k = v = ""
+            if "|" in s:
+                cells = [c for c in (clean(x) for x in s.split("|")) if c]
+                if len(cells) >= 2:
+                    k, v = cells[0], cells[1]
+            elif ":" in s or "՝" in s:
+                k, v = [clean(x) for x in re.split(r"[:՝]", s, 1)]
             if not k or not v or len(k) > 30 or junk(v):
+                continue
+            if re.fullmatch(r"[-—\s]+", k):
                 continue
             if (k, v) not in specs:
                 specs.append((k, v))
@@ -399,7 +340,7 @@ def item_data(sess, path):
             names.add(name)
             photos.append(u)
 
-    print("  %s: фото %d, «%s», «%s», бնութ. %d, опис %d, обн «%s»"
+    print("  %s: фото %d, «%s», «%s», բնութ. %d, опис %d, թարմ. «%s»"
           % (path, len(photos), title[:40], price, len(specs), len(desc), updated))
 
     return {"title": title, "price": price, "desc": desc, "place": place,
@@ -449,14 +390,16 @@ def make_caption(sess, d):
     if spec_lines:
         blocks.append("\n".join(spec_lines))
 
-    desc = clean(translate(sess, (d.get("desc") or "")[:400]))
+    desc = clean(translate(sess, (d.get("desc") or "")[:300]))
     if head and desc.lower().startswith(head.lower()[:25]):
         desc = desc[len(head):].strip(" .,-")
-    if head and head.strip(" .") == desc.strip(" ."):
+    if head and head.strip(".") == desc.strip("."):
         desc = ""
-    if desc:
-        lines = []
-        cur = ""
+
+    if desc and spec_lines:
+        blocks.append(desc.split(". ")[0][:220].strip())
+    elif desc:
+        lines, cur = [], ""
         for s in re.split(r"(?<=[.!?])\s+", desc):
             if cur and len(cur) + len(s) > 120:
                 lines.append(cur)
@@ -465,7 +408,7 @@ def make_caption(sess, d):
                 cur = (cur + " " + s).strip()
         if cur:
             lines.append(cur)
-        blocks.append("\n".join(lines))
+        blocks.append("\n".join(lines[:3]))
 
     if d.get("phone"):
         blocks.append("Հեռախոս՝ " + d["phone"])
@@ -478,7 +421,7 @@ def make_caption(sess, d):
 
     return "\n\n".join(out)[:1024] or ""
 
-def tg_post(sess, method, data, files=None, timeout=90):
+def tg_post(sess, method, data, files=None, timeout=60):
     for attempt in range(SEND_TRIES):
         try:
             r = sess.post("https://api.telegram.org/bot%s/%s" % (TOKEN, method),
@@ -487,12 +430,12 @@ def tg_post(sess, method, data, files=None, timeout=90):
             if r.ok:
                 return r
             if r.status_code in (429, 500, 502, 503, 504):
-                time.sleep(5 * (attempt + 1))
+                time.sleep(3 * (attempt + 1))
                 continue
             return None
         except Exception as e:
             print("telegram %s սխալ %s" % (method, type(e).__name__))
-            time.sleep(5 * (attempt + 1))
+            time.sleep(3 * (attempt + 1))
     return None
 
 def send(sess, d, caption):
@@ -510,7 +453,7 @@ def send(sess, d, caption):
     if not blobs:
         r = tg_post(sess, "sendMessage",
                     {"chat_id": CHAT_ID, "text": caption,
-                     "reply_markup": json.dumps(markup)}, timeout=60)
+                     "reply_markup": json.dumps(markup)})
         return r is not None
 
     if len(blobs) >= 2:
@@ -520,7 +463,7 @@ def send(sess, d, caption):
             media.append({"type": "photo", "media": "attach://p%d" % i})
         r = tg_post(sess, "sendMediaGroup",
                     {"chat_id": CHAT_ID, "media": json.dumps(media, ensure_ascii=False)},
-                    files=files, timeout=180)
+                    files=files, timeout=120)
         if r is not None:
             mid = None
             try:
@@ -533,14 +476,17 @@ def send(sess, d, caption):
                        "reply_markup": json.dumps(markup)}
             if mid:
                 payload["reply_parameters"] = json.dumps({"message_id": mid})
-            tg_post(sess, "sendMessage", payload, timeout=40)
+            tg_post(sess, "sendMessage", payload, timeout=30)
             return True
         print("  ալբոմը չանցավ, մեկ նկարով")
 
     r = tg_post(sess, "sendPhoto",
                 {"chat_id": CHAT_ID, "caption": caption,
                  "reply_markup": json.dumps(markup)},
-                files={"photo": ("p.jpg", blobs[0])}, timeout=150)
+                files={"photo": ("p.jpg", blobs[0])}, timeout=120)
+    if r is None:
+        r = tg_post(sess, "sendPhoto", {"chat_id": CHAT_ID, "caption": caption},
+                    files={"photo": ("p.jpg", blobs[0])}, timeout=120)
     return r is not None
 
 def load():
@@ -669,7 +615,7 @@ def recheck(sess, st, deadline):
             queued.add(path)
             added += 1
             print("  թարմացվածը հերթում է:", path, stamp)
-        time.sleep(0.5)
+        time.sleep(0.3)
     print("թարմացումների ստուգում. նորերը՝ %d | հերթ: %d" % (added, len(st["queue"])))
     save(st)
     return added
