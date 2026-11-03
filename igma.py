@@ -4,7 +4,8 @@ igma.am -> Telegram («Բարախոլկա Երևան»).
 
  - միայն վաճառքի բաժիններ
  - «նմանատիպ հայտարարություններ» բլոկը կտրվում է
- - բնութագրերը կայքի աղյուսակից են, նկարագրությունը՝ կետերով
+ - բնութագրերը կայքի աղյուսակից են՝ զույգ տողերով
+ - տեղը վերցվում է վերնագրի տակից
  - նոր «Թարմացվել է»-ով հայտարարությունը նորից մտնում է հերթ
 """
 import os
@@ -36,8 +37,9 @@ MAX_TRIES   = 3
 MAX_POSTS   = 1
 SEND_TRIES  = 2
 WATCH_K     = 20
+PAGES       = 20
 MAXP        = 9 * 1024 * 1024
-EXCLUDE_V   = 5
+EXCLUDE_V   = 6
 RESET_V     = "reset_v5"
 
 BASE        = "https://igma.am"
@@ -63,23 +65,21 @@ CANDIDATES = ("cat-200", "cat-400", "cat-500", "cat-600", "cat-700", "cat-800",
               "cat-900", "cat-1000", "cat-2000", "cat-3000", "cat-4000",
               "cat-5000", "cat-6000", "cat-7000", "cat-8000", "cat-9000")
 
-EXCLUDE = ("անարժ", "մշար", "աշխատանք", "ծառայ", "տրանսպորտ", "ավտոմեք",
-           "վարձ", "недвижим", "транспорт", "автомобил", "работа",
-           "услуг", "аренд", "прокат")
+EXCLUDE = ("անշարժ", "աշխատանք", "ծառայ", "տրանսպորտ", "ավտոմեք", "վարձ",
+           "недвижим", "транспорт", "автомобил", "работа", "услуг",
+           "аренд", "прокат")
 
 SIM = ("Նմանատիպ", "Похожие", "Similar", "Այլ հայտարարություն", "Igma.am app")
 
-SPEC_HEAD = ("Ապրանքի մասին տեղեկատվություն", "Տեղեկատվություն ապրանքի",
-             "Տեխնիկական բնութագրեր", "Օգտակար տեղեկատվություն",
-             "О товаре", "Характеристики")
+DESC_HEAD = ("## Նկարագրություն", "## Описание")
 
 CARD_RE  = re.compile(r"\[!\[[^\]]*\]\(([^)]+)\)\]\((https://igma\.am/(?:[a-z]{2}/)?ads/(\d+))\)")
 PRICE_RE = re.compile(r"([\d][\d\s ]{0,12})\s*(֏|\$|€)")
 IMG_RE   = re.compile(r"!\[[^\]]*\]\((https?://[^)]+)\)")
 
 BAD = ("http", "www.", "igma.am", "размещено", "обновлено", "информация",
-       "image", "аватар", "ավատար", "logo", "url", "статус", "կատեգորիա",
-       "категория", "տեղադրված", "թարմացվ", "цена", "цена")
+       "image", "аватар", "ավատար", "logo", "url", "статус", "категория",
+       "տեղադրված", "թարմացվ", "цена")
 
 def scrub(text):
     t = " ".join((text or "").split())
@@ -147,7 +147,7 @@ def good(text):
     low = text.lower()
     return not any(b in low for b in BLOCKED)
 
-def via_proxy(getter, url):
+def via_proxy(url):
     for p in PROXIES:
         try:
             r = requests.get(p, params={"url": url}, headers=HDRS, timeout=20)
@@ -176,7 +176,7 @@ def fetch(sess, url):
             return r.text
     except Exception:
         pass
-    t = via_proxy(sess.get, url)
+    t = via_proxy(url)
     if t:
         return t
     print("  չկարդացվեց:", url)
@@ -240,12 +240,13 @@ def get_items(sess, st, deadline):
     found = {}
     for cat in cats(sess, st):
         per_cat = 0
-        for page in range(1, 21):
+        for page in range(1, PAGES + 1):
             if time.time() > deadline:
                 return found
-            md = fetch(sess, "%s/listings?category=%s" % (BASE, cat))
+            url = "%s/listings?category=%s" % (BASE, cat)
             if page > 1:
-                md = fetch(sess, "%s/listings?category=%s&page=%d" % (BASE, cat, page))
+                url += "&page=%d" % page
+            md = fetch(sess, url)
             if not md:
                 break
             md = cut_similar(md)
@@ -265,7 +266,7 @@ def get_items(sess, st, deadline):
             print("[%s] էջ %d: նոր %d" % (cat, page, n))
             if n == 0 or per_cat >= 2000:
                 break
-            time.sleep(0.5)
+            time.sleep(0.4)
     return found
 
 def find_phone(md):
@@ -277,29 +278,43 @@ def find_phone(md):
     return ""
 
 def get_specs(md):
-    specs = []
-    for head in SPEC_HEAD:
-        m = re.search(re.escape(head) + r"(.+?)(?:\n#{1,3}\s|\nՆկարագրություն|\Z)",
-                      md, re.S)
-        if not m:
+    cut = len(md)
+    for h in DESC_HEAD:
+        i = md.find(h)
+        if i > 0:
+            cut = min(cut, i)
+    head = md[:cut]
+
+    blocks, cur = [], None
+    for raw in head.split("\n"):
+        if raw.startswith("###"):
+            cur = []
+            blocks.append(cur)
             continue
-        for line in m.group(1).split("\n"):
-            s = clean(line)
-            if not s or len(s) > 120:
+        if raw.startswith("##"):
+            cur = None
+            continue
+        if cur is None:
+            continue
+        s = clean(raw)
+        if s:
+            cur.append(s)
+
+    specs = []
+    for block in blocks:
+        i = 0
+        while i + 1 < len(block):
+            k, v = block[i], block[i + 1]
+            i += 2
+            if not k or not v:
                 continue
-            k = v = ""
-            if "|" in s:
-                cells = [c for c in (clean(x) for x in s.split("|")) if c]
-                if len(cells) >= 2:
-                    k, v = cells[0], cells[1]
-            elif ":" in s or "՝" in s:
-                k, v = [clean(x) for x in re.split(r"[:՝]", s, 1)]
-            if not k or not v or len(k) > 30 or junk(v):
+            if len(k) > 40 or len(v) > 90:
                 continue
-            if re.fullmatch(r"[-—\s]+", k):
+            if junk(k) or junk(v):
                 continue
-            if (k, v) not in specs:
-                specs.append((k, v))
+            if (k, v) in specs:
+                continue
+            specs.append((k, v))
             if len(specs) >= 5:
                 return specs
     return specs
@@ -312,16 +327,13 @@ def item_data(sess, path):
     md = cut_similar(md)
 
     title = ""
-    m = re.search(r"Title\W{0,3}\s*(.+)", md)
+    m = re.search(r"^#\s+(.+)$", md, re.M)
     if m:
-        title = clean(m.group(1).split("—")[0])[:90]
-    if not title or junk(title) or title.lower().startswith("информация"):
-        title = ""
-        m = re.search(r"^#\s+(.+)", md, re.M)
+        title = clean(m.group(1))[:90]
+    if not title or junk(title):
+        m = re.search(r"Title\W{0,3}\s*(.+)", md)
         if m:
-            t = clean(m.group(1))[:90]
-            if t and not junk(t) and not t.lower().startswith("информация"):
-                title = t
+            title = clean(m.group(1).split("—")[0])[:90]
 
     price = ""
     mp = PRICE_RE.search(md)
@@ -331,14 +343,16 @@ def item_data(sess, path):
             price = num + " " + mp.group(2)
 
     place = ""
-    m = re.search(r"Տեղ\s*[:՝]\s*(.+)", md)
+    m = re.search(r"^#\s.+?\n+\s*([^\n#|]{2,30})\n\s*—\s*([^\n#|]{2,30})\s*$", md, re.M)
     if m:
-        parts = [p.strip() for p in re.split(r"[—–]", clean(m.group(1))) if p.strip()]
-        if parts:
-            place = " — ".join(parts[:2])[:60]
-    if not place or len(place) < 3 or re.fullmatch(r"[\W\d_]+", place):
-        place = ""
-    if re.search(r"[A-Za-z]{2,}\s*\d", place):
+        place = (clean(m.group(1)) + " — " + clean(m.group(2)))[:60]
+    if not place:
+        m = re.search(r"^#\s.+?\n+\s*([^\n#|]{2,20})\s*$", md, re.M)
+        if m:
+            cand = clean(m.group(1))
+            if cand and not junk(cand) and cand.lower() != title.lower()[:20]:
+                place = cand[:30]
+    if place and (len(place) < 3 or re.fullmatch(r"[\W\d_]+", place)):
         place = ""
 
     posted = ""
@@ -362,7 +376,7 @@ def item_data(sess, path):
     stamp = updated or posted
 
     desc = ""
-    m = re.search(r"Նկարագրություն\s*\n+(.+?)(?:\n\s*Տեղադրված|\n\s*Տեղադրվել|\n\s*Թարմացվել|\Z)",
+    m = re.search(r"##\s*(?:Նկարագրություն|Описание)\s*\n+(.+?)(?:\n\s*Տեղադրված|\n\s*Տեղադրվել|\n\s*Թարմացվել|\n#|\Z)",
                   md, re.S)
     if m:
         desc = clean(" ".join(m.group(1).split()))
@@ -370,7 +384,7 @@ def item_data(sess, path):
         best = ""
         for line in md.split("\n"):
             s = clean(line)
-            if len(s) > len(best) and not junk(s) and s != title:
+            if len(s) > len(best) and not junk(s) and s != title and not line.startswith("#"):
                 best = s
         if len(best) > 20:
             desc = best
@@ -391,8 +405,8 @@ def item_data(sess, path):
             names.add(name)
             photos.append(u)
 
-    print("  %s: фото %d, «%s», «%s», բնութ. %d, опис %d, թարմ. «%s»"
-          % (path, len(photos), title[:40], price, len(specs), len(desc), updated))
+    print("  %s: фото %d, «%s», «%s», տեղ «%s», բնութ. %d, опис %d"
+          % (path, len(photos), title[:35], price, place[:25], len(specs), len(desc)))
 
     return {"title": title, "price": price, "desc": desc, "place": place,
             "phone": find_phone(md), "photos": photos[:10], "specs": specs,
@@ -445,7 +459,7 @@ def make_caption(sess, d):
             meta.append("Գին՝ " + p)
     if d.get("place"):
         pl = clean(translate(sess, d["place"]))
-        if pl:
+        if pl and pl.lower() != head.lower():
             meta.append("Տեղ՝ " + pl[:60])
     if meta:
         blocks.append("\n".join(meta))
