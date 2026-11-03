@@ -4,8 +4,7 @@ igma.am -> Telegram («Բարախոլկա Երևան»).
 
  - միայն վաճառքի բաժիններ
  - «նմանատիպ հայտարարություններ» բլոկը կտրվում է
- - բնութագրերը կայքի աղյուսակից են՝ զույգ տողերով
- - տեղը վերցվում է վերնագրի տակից
+ - կետերով միայն կայքի աղյուսակն է, վաճառողի տեքստը՝ իր իսկ տեսքով
  - նոր «Թարմացվել է»-ով հայտարարությունը նորից մտնում է հերթ
 """
 import os
@@ -319,6 +318,24 @@ def get_specs(md):
                 return specs
     return specs
 
+def desc_lines(md):
+    m = re.search(r"##\s*(?:Նկարագրություն|Описание)\s*\n+(.+?)"
+                  r"(?:\n\s*Տեղադրված|\n\s*Տեղադրվել|\n\s*Թարմացվել|\n\s*##|\Z)",
+                  md, re.S)
+    if not m:
+        return []
+    raw = [clean(x) for x in m.group(1).split("\n")]
+    raw = [x for x in raw if x and not junk(x)]
+
+    out = []
+    for x in raw:
+        if out and (out[-1].endswith((":", "՝")) or
+                    (len(out[-1]) <= 22 and x[:1].islower())):
+            out[-1] = out[-1] + " " + x
+        else:
+            out.append(x)
+    return out
+
 def item_data(sess, path):
     md = fetch(sess, BASE + path)
     if not md:
@@ -375,19 +392,15 @@ def item_data(sess, path):
 
     stamp = updated or posted
 
-    desc = ""
-    m = re.search(r"##\s*(?:Նկարագրություն|Описание)\s*\n+(.+?)(?:\n\s*Տեղադրված|\n\s*Տեղադրվել|\n\s*Թարմացվել|\n#|\Z)",
-                  md, re.S)
-    if m:
-        desc = clean(" ".join(m.group(1).split()))
-    if len(desc) < 20:
+    lines = desc_lines(md)
+    if not lines:
         best = ""
         for line in md.split("\n"):
             s = clean(line)
             if len(s) > len(best) and not junk(s) and s != title and not line.startswith("#"):
                 best = s
         if len(best) > 20:
-            desc = best
+            lines = [best]
 
     specs = get_specs(md)
 
@@ -405,13 +418,14 @@ def item_data(sess, path):
             names.add(name)
             photos.append(u)
 
-    print("  %s: фото %d, «%s», «%s», տեղ «%s», բնութ. %d, опис %d"
-          % (path, len(photos), title[:35], price, place[:25], len(specs), len(desc)))
+    print("  %s: фото %d, «%s», «%s», տեղ «%s», բնութ. %d, տող %d"
+          % (path, len(photos), title[:35], price, place[:25], len(specs), len(lines)))
 
-    return {"title": title, "price": price, "desc": desc, "place": place,
-            "phone": find_phone(md), "photos": photos[:10], "specs": specs,
-            "posted": posted, "updated": updated, "stamp": stamp,
-            "date": updated[:10] or posted[:10], "url": BASE + path}
+    return {"title": title, "price": price, "desc": "\n".join(lines),
+            "place": place, "phone": find_phone(md), "photos": photos[:10],
+            "specs": specs, "posted": posted, "updated": updated,
+            "stamp": stamp, "date": updated[:10] or posted[:10],
+            "url": BASE + path}
 
 def headline(sess, d):
     src = clean(d.get("title") or "")
@@ -426,24 +440,6 @@ def headline(sess, d):
     if t and (has_cyr(t) or script(t) == "lat"):
         return " ".join(t.split())[:90]
     return " ".join((t or alt).split())[:90]
-
-def bullets(text, limit=6, width=85):
-    t = (text or "").replace(";", "\n").replace("•", "\n").replace(" · ", "\n")
-    out = []
-    for p in re.split(r"(?:[.!?]+\s+|\n+)", t):
-        p = clean(p)
-        if len(p) < 3:
-            continue
-        for seg in re.split(r"\s{2,}", p):
-            seg = seg.strip(" ,-")
-            if len(seg) < 3:
-                continue
-            if len(seg) > width:
-                seg = seg[:width].rstrip(" ,") + "…"
-            out.append("• " + seg)
-            if len(out) >= limit:
-                return out
-    return out
 
 def make_caption(sess, d):
     head = clean(headline(sess, d))[:90]
@@ -473,15 +469,21 @@ def make_caption(sess, d):
     if spec_lines:
         blocks.append("\n".join(spec_lines))
 
-    desc = clean(translate(sess, (d.get("desc") or "")[:400]))
-    if head and desc.lower().startswith(head.lower()[:25]):
-        desc = desc[len(head):].strip(" .,-")
-    if head and head.strip(".") == desc.strip("."):
-        desc = ""
-    if desc:
-        bl = bullets(desc, limit=5 if spec_lines else 6)
-        if bl:
-            blocks.append("\n".join(bl))
+    lines, total = [], 0
+    for raw in (d.get("desc") or "").split("\n"):
+        s = clean(raw)
+        if not s or junk(s) or (head and s == head):
+            continue
+        if not has_cyr(s):
+            s = clean(translate(sess, s))
+        if not s:
+            continue
+        if len(lines) >= 8 or total + len(s) > 700:
+            break
+        lines.append(s)
+        total += len(s)
+    if lines:
+        blocks.append("\n".join(lines))
 
     if d.get("phone"):
         blocks.append("Հեռախոս՝ " + d["phone"])
