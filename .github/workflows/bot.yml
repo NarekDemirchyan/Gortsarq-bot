@@ -2,17 +2,12 @@ name: gortsarq
 
 on:
   workflow_dispatch:
-    inputs:
-      site:
-        description: "gortsarq կամ igma (դատարկ = ըստ հերթի)"
-        required: false
-        default: ""
 
 permissions:
   contents: write
 
 concurrency:
-  group: bot
+  group: baraxolka
   cancel-in-progress: false
 
 jobs:
@@ -21,6 +16,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
 
       - uses: actions/setup-python@v5
         with:
@@ -36,8 +33,7 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           JINA_KEY: ${{ secrets.JINA_KEY }}
-          SITE: ${{ inputs.site }}
-        run: python -u -c "import usercustomize, runpy; runpy.run_path('run.py', run_name='__main__')"
+        run: python -c "import usercustomize, runpy; runpy.run_path('run.py', run_name='__main__')"
 
       - name: Save state
         if: always()
@@ -47,9 +43,15 @@ jobs:
           for f in state-gortsarq.json state-igma.json published.json turn.json; do
             if [ -f "$f" ]; then git add "$f"; fi
           done
-          git diff --cached --quiet || git commit -m "state $(date -u +%Y-%m-%dT%H:%M)"
+          if git diff --cached --quiet; then
+            echo "no changes to save"
+            exit 0
+          fi
+          git commit -m "state $(date -u +%Y-%m-%dT%H:%M)"
           for i in 1 2 3 4 5; do
             git pull --rebase --autostash -q || true
-            if git push; then break; fi
+            if git push; then exit 0; fi
             sleep 5
           done
+          echo "push failed"
+          exit 1
