@@ -1,13 +1,4 @@
 # -*- coding: utf-8 -*-
-"""
-igma.am -> Telegram («Բարախոլկա Երևան»).
-
- 1. Հրապարակում հերթի գլխից՝ FIFO։
- 2. Հավաքում վերջին 60 օրվա հայտարարությունները, դնում պոչ։
- 3. Մեկ անգամ հրապարակվածը չի կրկնվում։
- 4. Տեքստում հղում, աստղանիշ կամ backtick չի մնում՝ միայն կոճակը։
- 5. Հերթի պոչը լցվում է բաժինների միջև հերթով։
-"""
 import os
 import re
 import json
@@ -16,7 +7,7 @@ import urllib.parse
 
 import requests
 
-from fetcher import translate, script, has_cyr, is_translit_hy, led_add, led_has
+from fetcher import translate, script, has_cyr, is_translit_hy, led_add
 
 try:
     from fetcher import to_md
@@ -24,15 +15,12 @@ except ImportError:
     def to_md(html, url=""):
         return html
 
-GT = chr(62)
-
 TOKEN    = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID", "")
 JINA_KEY = os.environ.get("JINA_KEY", "")
 
 SITE        = "igma"
 STATE       = "state-igma.json"
-LED         = "published.json"
 QUEUE_MAX   = 3000
 FRESH_DAYS  = 60
 PER_CAT     = 2000
@@ -41,10 +29,7 @@ MAX_PAGES   = 40
 MAX_TRIES   = 4
 MAX_POSTS   = 1
 SEND_TRIES  = 3
-WATCH_K     = 30
 MAXP        = 9 * 1024 * 1024
-
-EXCLUDE_V   = 3
 
 BASE        = "https://igma.am"
 GROUP_BOOST = "https://t.me/boost/erevan03_baraxolka"
@@ -63,25 +48,21 @@ PROXIES = (
     "https://api.allorigins.win/raw",
     "https://api.codetabs.com/v1/proxy",
     "https://corsproxy.io/?url=",
-    "https://api.cors.lol/?url=",
 )
 
 CANDIDATES = ("cat-200", "cat-400", "cat-500", "cat-600", "cat-700", "cat-800",
               "cat-900", "cat-1000", "cat-2000", "cat-3000", "cat-4000",
-              "cat-5000", "cat-6000", "cat-7000", "cat-8000", "cat-9000",
-              "cat-10000")
+              "cat-5000", "cat-6000", "cat-7000", "cat-8000", "cat-9000")
 
-EXCLUDE = ("անշարժ", "աշխատանք", "ծառայութ", "տրանսպորտ", "транспорт", "բոլոր")
-
+EXCLUDE  = ("անշարժ", "աշխատանք", "ծառայութ", "տրանսպորտ", "транспорт", "բոլոր")
 CARD_RE  = re.compile(r"\[!\[[^\]]*\]\(([^)]+)\)\]\((https://igma\.am/(?:[a-z]{2}/)?ads/(\d+))\)")
 PRICE_RE = re.compile(r"([\d][\d\s ]{0,12})\s*(֏|\$|€)")
 IMG_RE   = re.compile(r"!\[[^\]]*\]\((https?://[^)]+)\)")
-ITEM_ID_RE = re.compile(r"/ads/(\d+)")
-SPEC_RE  = re.compile(r"^([^:]{2,30}):\s*(.+)$")
+PHONE_RE = re.compile(r"(?:\+374|0)\d{2}[\s\-]?\d{2}[\s\-]?\d{2}[\s\-]?\d{2}")
 
-HEAD_FALLBACK = "Գովազդ"
-
-JUNK_KEYS = ("информация", "размещено", "обновлено", "категория", "статус")
+BAD = ("http", "www.", "igma.am", "размещено", "обновлено", "информация",
+       "image", "аватар", "ավատար", "logo", "title", "url", "статус",
+       "категория", "տեղադրված", "թարմացվել", "igmo", "— igma", "- igma")
 
 def scrub(text):
     t = " ".join((text or "").split())
@@ -90,7 +71,6 @@ def scrub(text):
     return t.strip(" ,.;:!?-\"")
 
 def clean(text):
-    """Մաքրում է հղումները, աստղանիշները, backtick-ը և ավելորդ նշանները։"""
     t = text or ""
     for sep in ("](", "] ("):
         guard = 0
@@ -104,22 +84,21 @@ def clean(text):
             t = t[:i] + " " + t[j + 1:]
     t = t.replace("[", " ").replace("]", " ")
     t = t.replace("**", " ").replace("`", " ").replace("_", " ")
-    words = [w for w in t.split() if not w.lower().startswith(("http", "www."))]
-    t = " ".join(words)
-    t = t.replace("igma.am", " ")
+    t = " ".join(w for w in t.split() if not w.lower().startswith(("http", "www.")))
     return scrub(t)
 
+def junk(text):
+    low = (text or "").lower()
+    return any(b in low for b in BAD)
+
 def money(price):
-    t = scrub(price or "")
-    m = re.match(r"([\d\s.,]+)\s*(֏|\$|€)?", t)
+    m = re.match(r"([\d\s.,]+)\s*(֏|\$|€)?", scrub(price))
     if not m:
         return ""
     digits = "".join(ch for ch in m.group(1) if ch.isdigit())
     if not digits:
         return ""
-    num = "{:,}".format(int(digits)).replace(",", " ")
-    cur = m.group(2) or ""
-    return (num + " " + cur).strip()
+    return ("{:,}".format(int(digits)).replace(",", " ") + " " + (m.group(2) or "")).strip()
 
 def today_str():
     return time.strftime("%d.%m.%Y", time.gmtime(time.time() + 4 * 3600))
@@ -149,8 +128,6 @@ def via_proxy(sess, proxy, url, headers, timeout):
         return sess.get(proxy + urllib.parse.quote(url, safe=""),
                         headers=headers, timeout=timeout)
     return sess.get(proxy, params={"url": url}, headers=headers, timeout=timeout)
-
-# ---------- ցանց ----------
 
 _FAILS = [0]
 
@@ -190,13 +167,6 @@ def fetch(sess, url):
 def site_up(sess):
     return bool(fetch(sess, BASE + "/listings"))
 
-# ---------- նկարներ ----------
-
-def relay_urls(u):
-    bare = u.split("://", 1)[-1]
-    return [f"https://images.weserv.nl/?url={bare}",
-            f"https://wsrv.nl/?url={bare}"]
-
 def img_ok(r):
     b = r.content or b""
     if r.status_code != 200 or len(b) < 800:
@@ -216,14 +186,9 @@ def photo_bytes(sess, url, ref):
             return r.content
     except Exception:
         pass
-    for p in PROXIES[:2]:
-        try:
-            r = via_proxy(sess, p, url, h, 25)
-            if img_ok(r) and len(r.content) <= MAXP:
-                return r.content
-        except Exception:
-            pass
-    for p in relay_urls(url)[:1]:
+    bare = url.split("://", 1)[-1]
+    for p in ("https://images.weserv.nl/?url=" + bare,
+              "https://wsrv.nl/?url=" + bare):
         try:
             r = sess.get(p, headers=h, timeout=25)
             if img_ok(r) and len(r.content) <= MAXP:
@@ -234,10 +199,8 @@ def photo_bytes(sess, url, ref):
     print("  նկարը չներբեռնվեց:", url)
     return None
 
-# ---------- բաժիններ ----------
-
 def cats(sess, st):
-    if st.get("cats") and st.get("exclude_v") == EXCLUDE_V:
+    if st.get("cats"):
         return st["cats"]
     found = []
     for cat in CANDIDATES:
@@ -246,26 +209,17 @@ def cats(sess, st):
             continue
         m = re.search(r"^#\s*Igma\.am\s*[—–-]\s*(.+)$", md, re.M)
         name = scrub(m.group(1)) if m else ""
-        low = name.lower()
-        if not name or any(x in low for x in EXCLUDE):
-            print(f"  {cat}՝ «{name}» — բաց թողնված")
+        if not name or any(x in name.lower() for x in EXCLUDE):
+            print("  %s՝ «%s» — բաց թողնված" % (cat, name))
             continue
         found.append(cat)
-        print(f"  {cat}՝ «{name}»")
+        print("  %s՝ «%s»" % (cat, name))
         time.sleep(1)
     if not found:
-        print("  բաժինները չճանաչվեցին, վերցնում ենք հիմնականները")
         found = ["cat-400", "cat-500", "cat-600"]
     st["cats"] = found
-    st["exclude_v"] = EXCLUDE_V
     save(st)
     return found
-
-# ---------- հավաքում ----------
-
-def list_url(cat, page):
-    u = "%s/listings?category=%s" % (BASE, cat)
-    return u if page == 1 else u + "&page=%d" % page
 
 def get_items(sess, st, deadline):
     found = {}
@@ -273,9 +227,11 @@ def get_items(sess, st, deadline):
         per_cat = 0
         for page in range(1, MAX_PAGES + 1):
             if time.time() > deadline:
-                print("  հավաքում. ժամանակը վերջացավ")
                 return found
-            md = fetch(sess, list_url(cat, page))
+            url = "%s/listings?category=%s" % (BASE, cat)
+            if page > 1:
+                url += "&page=%d" % page
+            md = fetch(sess, url)
             if not md:
                 break
             n = 0
@@ -288,24 +244,19 @@ def get_items(sess, st, deadline):
                 pm = PRICE_RE.search(tail)
                 if pm:
                     price = " ".join(pm.group(1).split()) + " " + pm.group(2)
-                found[path] = {"id": m.group(3), "path": path,
-                               "date": "", "price": price, "place": "",
-                               "photo": m.group(1), "cat": cat}
+                found[path] = {"id": m.group(3), "path": path, "date": "",
+                               "price": price, "photo": m.group(1), "cat": cat}
                 n += 1
             per_cat += n
-            print(f"[{cat}] стр.{page}: новых {n}")
+            print("[%s] стр.%d: новых %d" % (cat, page, n))
             if n == 0 or per_cat >= PER_CAT:
                 break
             time.sleep(1)
     return found
 
-# ---------- քարտ ----------
-
 def find_phone(md):
-    """Հեռախոսը վերցնում ենք միայն այն տողից, որտեղ բառ կա՝ հեռախոս/телефон։"""
     for line in md.split("\n"):
-        low = line.lower()
-        if "եռախոս" in line or "телефон" in low:
+        if "եռախոս" in line or "телефон" in line.lower():
             digits = "".join(ch for ch in line if ch.isdigit() or ch == "+")
             if len(digits) >= 8:
                 return digits
@@ -315,170 +266,108 @@ def item_data(sess, path):
     md = fetch(sess, BASE + path)
     if not md:
         return None
-
     cut = md.find("Igma.am app")
     if cut > 0:
         md = md[:cut]
 
     title = ""
-    mt = re.search(r"^#\s+(.+)$", md, re.M)
-    if mt:
-        title = clean(mt.group(1))
+    m = re.search(r"Title\W{0,3}\s*(.+)", md)
+    if m:
+        title = clean(m.group(1).split("—")[0].split("- Igma")[0])
     if not title:
-        mt = re.search(r"^#{1,3}\s+(.+)$", md, re.M)
-        if mt:
-            title = clean(mt.group(1))
+        m = re.search(r"^#+\s*(.+)$", md, re.M)
+        if m:
+            title = clean(m.group(1))
+    if junk(title):
+        title = ""
 
     price = ""
-    mp = PRICE_RE.search(md[:1200])
+    mp = PRICE_RE.search(md)
     if mp:
         num = " ".join(mp.group(1).split())
         if re.search(r"[1-9]", num):
             price = num + " " + mp.group(2)
 
-    tail = md[mp.end():mp.end() + 500] if mp else md[:1000]
-    parts = []
-    for line in tail.split("\n"):
-        low = clean(line)
-        if not low or low.startswith("#"):
-            continue
-        if low.lower().startswith(JUNK_KEYS):
-            continue
-        if "եռախոս" in low or "телефон" in low.lower():
-            continue
-        parts.append(low)
-        if len(parts) >= 2:
-            break
-    place = clean(" ".join(parts)).replace("|", "·")[:80]
-    if "2026" in place or "20" + "2" in place[:3]:
-        place = ""
-    if "елефон" in place.lower() or "եռախոս" in place:
+    place = ""
+    mpl = re.search(r"Տեղ\W{0,3}\s*(.+)", md)
+    if mpl:
+        parts = [p.strip() for p in re.split(r"[—–]", mpl.group(1)) if p.strip()]
+        if parts:
+            place = clean(" — ".join(parts[:2]))[:60]
+    if junk(place) or "2026" in place:
         place = ""
 
     desc = ""
-    mdsc = re.search(r"##\s*Նկարագրություն\s*\n+(.+?)(?:\n+\s*Տեղադրված է|\Z)", md, re.S)
-    if mdsc:
-        desc = clean(" ".join(mdsc.group(1).split()))
-
-    posted = ""
-    mpo = re.search(r"Տեղադրված է\s*(\d{2}\.\d{2}\.\d{4})", md)
-    if mpo:
-        posted = mpo.group(1)
+    m = re.search(r"(?:Նկարագրություն|Описание)\W*\n+(.+?)(?:\n\s*\n|\Z)", md, re.S)
+    if m:
+        desc = clean(" ".join(m.group(1).split()))
+    if len(desc) < 20:
+        best = ""
+        for line in md.split("\n"):
+            s = clean(line)
+            if len(s) > len(best) and not junk(s) and s != title:
+                best = s
+        desc = best if len(best) > 20 else desc
 
     updated = ""
-    mup = re.search(r"Թարմացվել է\s*(\d{2}\.\d{2}\.\d{4})", md)
-    if mup:
-        updated = mup.group(1)
-
-    specs = []
-    for line in md.split("\n"):
-        s = clean(line)
-        if not s or len(s) > 90 or s.startswith("#"):
-            continue
-        msm = SPEC_RE.match(s)
-        if not msm:
-            continue
-        k = clean(msm.group(1))
-        v = clean(msm.group(2))
-        if not v or len(v) > 60:
-            continue
-        if k.lower().startswith(JUNK_KEYS):
-            continue
-        if "елефон" in k.lower() or "եռախոս" in k:
-            continue
-        if v.lower().startswith(("http", "www.")):
-            continue
-        specs.append((k, v))
-        if len(specs) >= 5:
-            break
-
-    phone = find_phone(md)
+    mu = re.search(r"(?:Թարմացվել է|Обновлено)\D{0,3}(\d{2}\.\d{2}\.\d{4})", md)
+    if mu:
+        updated = mu.group(1)
+    posted = ""
+    mpo = re.search(r"(?:Տեղադրված է|Размещено)\D{0,3}(\d{2}\.\d{2}\.\d{4})", md)
+    if mpo:
+        posted = mpo.group(1)
 
     photos = []
     for mi in IMG_RE.finditer(md):
         u = mi.group(1)
         if "logo" in u or "promo" in u:
             continue
-        if "r2.dev" in u or "/storage/ads/" in u:
-            if u not in photos:
-                photos.append(u)
+        if ("r2.dev" in u or "/storage/" in u) and u not in photos:
+            photos.append(u)
 
-    print(f"  {path}: նկար {len(photos)}, «{title[:40]}», «{price}», "
-          f"նկարագրություն {len(desc)}, թարմացված «{updated}», բնութագիր {len(specs)}")
+    print("  %s: фото %d, «%s», «%s», опис %d, обн «%s»"
+          % (path, len(photos), title[:40], price, len(desc), updated))
 
-    return {"title": title, "price": price, "desc": desc, "place": place,
-            "photos": photos[:10], "posted": posted, "updated": updated,
-            "specs": specs, "phone": phone,
+    return {"title": title, "price": price, "place": place, "desc": desc,
+            "phone": find_phone(md), "photos": photos[:10],
             "date": updated or posted, "url": BASE + path}
 
-# ---------- տեքստ ----------
-
-def headline(sess, d):
-    src = clean(d.get("title") or "")
-    t = clean(translate(sess, src)) if src else ""
-    if src and (is_translit_hy(src) or is_translit_hy(t)):
-        return ""
-    if t and not re.search(r"(?:ться|тись)$", t.lower()) and (has_cyr(t) or script(t) == "lat"):
-        return " ".join(t.split())[:90]
-    alt = clean(translate(sess, (d.get("desc") or "")[:300]))
-    if has_cyr(alt) and len(alt.split()) >= 3:
-        return " ".join(re.split(r"[.!?]\s", alt)[0].split())[:90]
-    if t and (has_cyr(t) or script(t) == "lat"):
-        return " ".join(t.split())[:90]
-    return " ".join((t or alt).split())[:90]
-
 def make_caption(sess, d):
-    parts = [clean(headline(sess, d)) or HEAD_FALLBACK]
+    head = clean(translate(sess, d.get("title") or ""))
+    if not head or len(head) < 6:
+        head = clean(translate(sess, (d.get("desc") or "")[:140]))
+    head = head[:90]
 
+    lines = []
+    if head:
+        lines.append(head)
     if d.get("price"):
         p = money(d["price"])
         if p:
-            parts.append("Գին՝ " + p)
-
+            lines.append("Գին՝ " + p)
     if d.get("place"):
-        place = clean(translate(sess, d["place"]))
-        if place and len(place) > 2:
-            parts.append("Տեղ՝ " + place[:80])
-
-    for k, v in (d.get("specs") or [])[:5]:
-        kk = clean(translate(sess, k))
-        vv = clean(translate(sess, v))
-        if kk and vv:
-            parts.append((kk + "՝ " + vv)[:80])
-
+        pl = clean(translate(sess, d["place"]))
+        if pl:
+            lines.append("Տեղ՝ " + pl[:60])
     if d.get("phone"):
-        parts.append("Հեռախոս՝ " + d["phone"])
+        lines.append("Հեռախոս՝ " + d["phone"])
 
-    body = "\n".join(parts)
+    body = "\n".join(l for l in lines if l and not junk(l))
 
-    if d.get("desc"):
-        desc = clean(translate(sess, d["desc"][:500]))
-        if desc and len(body) + len(desc) + 2 <= 1000:
-            body = body + "\n\n" + desc
+    desc = clean(translate(sess, (d.get("desc") or "")[:400]))
+    if desc and desc != head and len(body) + len(desc) < 950:
+        body = (body + "\n\n" + desc).strip()
 
-    out = []
-    for line in body.split("\n"):
-        line = clean(line)
-        if line:
-            out.append(line)
+    out = [l for l in body.split("\n") if l.strip() and not junk(l)]
     return "\n".join(out)[:1024]
-
-def fp_key(d, date):
-    t = " ".join([d.get("title") or "", d.get("price") or "", date or ""]).lower()
-    t = " ".join(t.split())
-    h = 0
-    for ch in t:
-        h = (h * 131 + ord(ch)) % 1000000007
-    return "fp%d" % h
-
-# ---------- Telegram ----------
 
 def tg_post(sess, method, data, files=None, timeout=90):
     for attempt in range(SEND_TRIES):
         try:
-            r = sess.post(f"https://api.telegram.org/bot{TOKEN}/{method}",
+            r = sess.post("https://api.telegram.org/bot%s/%s" % (TOKEN, method),
                           data=data, files=files, timeout=timeout)
-            print(f"telegram {method}:", r.status_code, r.text[:160])
+            print("telegram %s: %s %s" % (method, r.status_code, r.text[:120]))
             if r.ok:
                 return r
             if r.status_code in (429, 500, 502, 503, 504):
@@ -486,7 +375,7 @@ def tg_post(sess, method, data, files=None, timeout=90):
                 continue
             return None
         except Exception as e:
-            print(f"telegram {method} սխալ {type(e).__name__}")
+            print("telegram %s սխալ %s" % (method, type(e).__name__))
             time.sleep(5 * (attempt + 1))
     return None
 
@@ -503,17 +392,16 @@ def send(sess, d, caption):
     ]}
 
     if not blobs:
-        print("  նկար չկա, ուղարկում ենք տեքստով")
         r = tg_post(sess, "sendMessage",
                     {"chat_id": CHAT_ID, "text": caption,
                      "reply_markup": json.dumps(markup)}, timeout=60)
         return r is not None
 
     if len(blobs) >= 2:
-        files = {f"p{i}": (f"p{i}.jpg", b) for i, b in enumerate(blobs)}
+        files = {"p%d" % i: ("p%d.jpg" % i, b) for i, b in enumerate(blobs)}
         media = [{"type": "photo", "media": "attach://p0", "caption": caption}]
         for i in range(1, len(blobs)):
-            media.append({"type": "photo", "media": f"attach://p{i}"})
+            media.append({"type": "photo", "media": "attach://p%d" % i})
         r = tg_post(sess, "sendMediaGroup",
                     {"chat_id": CHAT_ID, "media": json.dumps(media, ensure_ascii=False)},
                     files=files, timeout=180)
@@ -524,14 +412,14 @@ def send(sess, d, caption):
                 if res:
                     mid = res[0]["message_id"]
             except Exception:
-                mid = None
+                pass
             payload = {"chat_id": CHAT_ID, "text": "Связаться с продавцом",
                        "reply_markup": json.dumps(markup)}
             if mid:
                 payload["reply_parameters"] = json.dumps({"message_id": mid})
             tg_post(sess, "sendMessage", payload, timeout=40)
             return True
-        print("  ալբոմը չանցավ, փորձում ենք մեկ նկարով")
+        print("  ալբոմը չանցավ, մեկ նկարով")
 
     r = tg_post(sess, "sendPhoto",
                 {"chat_id": CHAT_ID, "caption": caption,
@@ -539,16 +427,13 @@ def send(sess, d, caption):
                 files={"photo": ("p.jpg", blobs[0])}, timeout=150)
     return r is not None
 
-# ---------- վիճակ ----------
-
 def load():
     if os.path.exists(STATE):
         try:
             return json.load(open(STATE, encoding="utf-8"))
         except Exception as e:
             print("state-igma.json չի կարդացվում:", e)
-    return {"queue": [], "published": {}, "seen": {}, "fps": {},
-            "watch": [], "watch_pos": 0}
+    return {"queue": [], "published": {}, "seen": {}}
 
 def save(st):
     json.dump(st, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
@@ -556,40 +441,24 @@ def save(st):
 def norm_queue(st):
     q = []
     for e in st.get("queue", []):
-        if isinstance(e, dict) and e.get("path"):
-            p = str(e["path"]).split("]")[0].split(")")[0]
-            iid = str(e.get("id") or "")
-            if not iid:
-                mm = ITEM_ID_RE.search(p)
-                iid = mm.group(1) if mm else p
-            q.append({"id": iid, "path": p, "date": e.get("date", ""),
-                      "price": e.get("price", ""), "place": e.get("place", ""),
-                      "photo": e.get("photo", ""), "cat": e.get("cat", "")})
-        elif isinstance(e, str):
-            p = e.split("]")[0].split(")")[0]
-            mm = ITEM_ID_RE.search(p)
-            q.append({"id": mm.group(1) if mm else p, "path": p, "date": "",
-                      "price": "", "place": "", "photo": "", "cat": ""})
+        p = e.get("path") if isinstance(e, dict) else e
+        p = str(p).split("]")[0].split(")")[0]
+        mm = re.search(r"/ads/(\d+)", p)
+        q.append({"id": mm.group(1) if mm else p, "path": p,
+                  "price": e.get("price", "") if isinstance(e, dict) else "",
+                  "photo": e.get("photo", "") if isinstance(e, dict) else "",
+                  "cat": e.get("cat", "") if isinstance(e, dict) else ""})
     st["queue"] = q
 
 def trim(st):
     while len(st["queue"]) > QUEUE_MAX:
         gone = st["queue"].pop(0)
         st["seen"][gone["path"]] = True
-        print("առաստաղ. գլխից դուրս եկավ:", gone["path"])
     if len(st["published"]) > 50000:
-        keys = list(st["published"])[-20000:]
-        st["published"] = {k: st["published"][k] for k in keys}
+        st["published"] = {k: st["published"][k] for k in list(st["published"])[-20000:]}
     if len(st["seen"]) > 50000:
         for k in list(st["seen"])[:20000]:
             st["seen"].pop(k, None)
-    if len(st["fps"]) > 20000:
-        for k in list(st["fps"])[:12000]:
-            st["fps"].pop(k, None)
-    if len(st["watch"]) > 6000:
-        st["watch"] = st["watch"][-4000:]
-
-# ---------- հրապարակում ----------
 
 def publish_one(sess, st, e, now):
     path = e["path"]
@@ -598,17 +467,15 @@ def publish_one(sess, st, e, now):
     if st["published"].get(path):
         return "skip"
 
-    d = None
     try:
         d = item_data(sess, path)
     except Exception as ex:
         print("ошибка разбора:", ex)
+        d = None
 
     if not d:
         if not site_up(sess):
-            print("  կայքը չի բացվում. հայտարարությունը մնում է հերթի գլխում:", iid)
             return "hold"
-        print("  քարտը չի ընթերցվում, դուրս ենք գցում ընդմիշտ:", iid)
         st["seen"][path] = True
         return "dropcard"
 
@@ -617,31 +484,20 @@ def publish_one(sess, st, e, now):
     if not d.get("photos") and e.get("photo"):
         d["photos"] = [e["photo"]]
 
-    date = d.get("date") or e.get("date") or ""
+    date = d.get("date") or ""
     if date and date not in last_days(FRESH_DAYS):
-        print("  հին հայտարարություն, դուրս ենք գցում:", iid, date)
         st["seen"][path] = True
         return "drop"
 
     cap = make_caption(sess, d)
     if not cap:
-        print("  դատարկ հայտարարություն, դուրս ենք գցում հերթից:", iid)
         st["seen"][path] = True
         return "drop"
 
-    k = fp_key(d, date)
-    if st["fps"].get(k):
-        print("  նույնը արդեն եղել է՝", k)
-        st["seen"][path] = True
-        return "skip"
-
     if send(sess, d, cap):
         st["published"][path] = date or today_str()
-        st["fps"][k] = date or today_str()
-        if path not in st["watch"]:
-            st["watch"].append(path)
         led_add(SITE, iid, now)
-        print(f"опубликовано: {iid} ({path}) фото {len(d.get('photos') or [])}")
+        print("опубликовано: %s (%s) фото %d" % (iid, path, len(d.get("photos") or [])))
         return "ok"
     return "fail"
 
@@ -657,56 +513,15 @@ def publish_phase(sess, st, now, limit=1):
         elif res in ("drop", "dropcard", "skip"):
             save(st)
             continue
-        elif res == "hold":
-            st["queue"].insert(0, e)
-            break
-        elif res == "fail":
+        else:
             st["queue"].insert(0, e)
             break
     return done
-
-# ---------- թարմացումներ ----------
-
-def recheck(sess, st, deadline):
-    watch = st.get("watch") or []
-    if not watch:
-        return 0
-    pos = int(st.get("watch_pos", 0)) % len(watch)
-    picked = [watch[(pos + k) % len(watch)] for k in range(min(WATCH_K, len(watch)))]
-    st["watch_pos"] = (pos + len(picked)) % len(watch)
-
-    queued = {e["path"] for e in st["queue"]}
-    added = 0
-    for path in picked:
-        if time.time() > deadline:
-            break
-        d = item_data(sess, path)
-        if not d or not d.get("date"):
-            continue
-        prev = st["published"].get(path) or ""
-        if dkey(d["date"]) > dkey(prev) and path not in queued:
-            st["queue"].append({"id": path.rsplit("/", 1)[-1], "path": path,
-                                "date": d["date"], "price": d.get("price", ""),
-                                "place": d.get("place", ""),
-                                "photo": (d.get("photos") or [""])[0],
-                                "cat": ""})
-            queued.add(path)
-            added += 1
-            print("  թարմացվածը հերթում է:", path, d["date"])
-    trim(st)
-    print("թարմացումների ստուգում. նորերը՝", added, "| հերթ:", len(st["queue"]))
-    save(st)
-    return added
-
-# ---------- հիմնական ----------
 
 def main():
     st = load()
     st.setdefault("published", {})
     st.setdefault("seen", {})
-    st.setdefault("fps", {})
-    st.setdefault("watch", [])
-    st.setdefault("watch_pos", 0)
     norm_queue(st)
 
     sess = requests.Session()
@@ -719,15 +534,12 @@ def main():
     items = get_items(sess, st, deadline)
     print("всего найдено:", len(items))
 
-    in_queue = {e["path"] for e in st["queue"]}
+    in_queue = set(e["path"] for e in st["queue"])
     by_cat = {}
     for path, it in items.items():
         if path in st["seen"] or path in st["published"] or path in in_queue:
             continue
-        by_cat.setdefault(it.get("cat", ""), []).append({
-            "id": it["id"], "path": path, "date": it.get("date", ""),
-            "price": it.get("price", ""), "place": "",
-            "photo": it.get("photo", ""), "cat": it.get("cat", "")})
+        by_cat.setdefault(it["cat"], []).append(it)
 
     fresh = []
     order = list(by_cat)
@@ -741,18 +553,16 @@ def main():
     if fresh:
         st["queue"].extend(fresh)
         print("новых в очередь:", len(fresh))
+
     trim(st)
     save(st)
-
-    if time.time() < deadline:
-        recheck(sess, st, deadline)
 
     if done < MAX_POSTS and st["queue"]:
         done += publish_phase(sess, st, time.time(), MAX_POSTS - done)
 
     trim(st)
     save(st)
-    print(f"готово, публикаций за запуск: {done} | очередь: {len(st['queue'])}")
+    print("готово, публикаций за запуск: %d | очередь: %d" % (done, len(st["queue"])))
     return done
 
 if __name__ == "__main__":
