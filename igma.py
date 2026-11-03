@@ -2,10 +2,11 @@
 """
 igma.am -> Telegram («Բարախոլկա Երևան»).
 
- - վաճառքի բաժիններ, առանց անշարժ գույքի, աշխատանքի, ծառայությունների,
-   տրանսպորտի ու վարձույթի
+ - միայն վաճառքի բաժիններ. բացառված են անշարժ գույքը, աշխատանքը,
+   ծառայությունները, տրանսպորտը, ավտոմեքենաները, վարձույթը
  - մեկ անգամ հրապարակվածը չի կրկնվում
- - տեքստում հղում, backtick կամ էջի պիտակ չի մնում
+ - նկարները միայն այդ հայտարարությունից, ոչ «նմանատիպերից»
+ - տեքստում հղում կամ էջի պիտակ չի մնում
 """
 import os
 import re
@@ -38,7 +39,7 @@ MAX_TRIES   = 4
 MAX_POSTS   = 1
 SEND_TRIES  = 3
 MAXP        = 9 * 1024 * 1024
-EXCLUDE_V   = 4
+EXCLUDE_V   = 5
 
 BASE        = "https://igma.am"
 GROUP_BOOST = "https://t.me/boost/erevan03_baraxolka"
@@ -63,7 +64,11 @@ CANDIDATES = ("cat-200", "cat-400", "cat-500", "cat-600", "cat-700", "cat-800",
               "cat-900", "cat-1000", "cat-2000", "cat-3000", "cat-4000",
               "cat-5000", "cat-6000", "cat-7000", "cat-8000", "cat-9000")
 
-EXCLUDE = ("անշարժ", "աշխատանք", "ծառայութ", "տրանսպորտ", "վարձույթ", "բոլոր")
+EXCLUDE = ("անշարժ", "աշխատանք", "ծառայութ", "տրանսպորտ", "վարձույթ",
+           "недвижим", "работ", "услуг", "транспорт", "авто", "машин",
+           "аренд", "прокат", "բոլոր")
+
+SIM = ("Նմանատիպ", "Похожие", "Similar", "Այլ հայտարարություն", "Igma.am app")
 
 CARD_RE  = re.compile(r"\[!\[[^\]]*\]\(([^)]+)\)\]\((https://igma\.am/(?:[a-z]{2}/)?ads/(\d+))\)")
 PRICE_RE = re.compile(r"([\d][\d\s ]{0,12})\s*(֏|\$|€)")
@@ -277,9 +282,10 @@ def item_data(sess, path):
     if not md:
         return None
 
-    cut = md.find("Igma.am app")
-    if cut > 0:
-        md = md[:cut]
+    for s in SIM:
+        cut = md.find(s)
+        if cut > 0:
+            md = md[:cut]
 
     title = ""
     m = re.search(r"Title\W{0,3}\s*(.+)", md)
@@ -333,11 +339,17 @@ def item_data(sess, path):
         posted = mpo.group(1)
 
     photos = []
+    names = set()
     for mi in IMG_RE.finditer(md):
         u = mi.group(1)
-        if "logo" in u or "promo" in u:
+        low = u.lower()
+        if "logo" in low or "promo" in low or "avatar" in low:
             continue
-        if ("r2.dev" in u or "/storage/" in u) and u not in photos:
+        name = u.rsplit("/", 1)[-1].split("?")[0]
+        if name in names:
+            continue
+        if "r2.dev" in u or "/storage/" in u:
+            names.add(name)
             photos.append(u)
 
     print("  %s: фото %d, «%s», «%s», опис %d"
@@ -519,8 +531,7 @@ def publish_one(sess, st, e, now):
     path = e["path"]
     iid = e.get("id") or ""
 
-    prev = st["published"].get(path)
-    if prev:
+    if st["published"].get(path):
         return "skip"
 
     d = None
