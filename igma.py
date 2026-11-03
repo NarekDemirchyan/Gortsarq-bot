@@ -2,12 +2,10 @@
 """
 igma.am -> Telegram («Բարախոլկա Երևան»).
 
- - միայն վաճառքի բաժիններ. բացառված են անշարժ գույքը, աշխատանքը,
-   ծառայությունները, տրանսպորտը, ավտոմեքենաները, վարձույթը
+ - միայն վաճառքի բաժիններ
  - «նմանատիպ հայտարարություններ» բլոկը կտրվում է
- - ամեն վազքում ստուգվում են հրապարակվածները. նոր «Թարմացվել է»-ով
-   հայտարարությունը նորից մտնում է հերթ
- - տեքստում հղում կամ էջի պիտակ չի մնում
+ - բնութագրերը տպվում են տողերով. «Վիճակ՝ …», «Մակնիշ՝ …»
+ - նոր «Թարմացվել է»-ով հայտարարությունը նորից մտնում է հերթ
 """
 import os
 import re
@@ -72,6 +70,9 @@ EXCLUDE = ("անշարժ", "աշխատանք", "ծառայութ", "տրանսպ
            "аренд", "прокат", "բոլոր")
 
 SIM = ("Նմանատիպ", "Похожие", "Similar", "Այլ հայտարարություն", "Igma.am app")
+
+SPEC_HEAD = ("Ապրանքի մասին տեղեկատվություն", "Տեղեկատվություն ապրանքի",
+             "О товаре", "Характеристики")
 
 CARD_RE  = re.compile(r"\[!\[[^\]]*\]\(([^)]+)\)\]\((https://igma\.am/(?:[a-z]{2}/)?ads/(\d+))\)")
 PRICE_RE = re.compile(r"([\d][\d\s ]{0,12})\s*(֏|\$|€)")
@@ -288,6 +289,29 @@ def find_phone(md):
                 return digits
     return ""
 
+def get_specs(md):
+    specs = []
+    for head in SPEC_HEAD:
+        m = re.search(re.escape(head) + r"(.+?)(?:\n#{1,3}\s|\nՆկարագրություն|\Z)",
+                      md, re.S)
+        if not m:
+            continue
+        for line in m.group(1).split("\n"):
+            s = clean(line)
+            if not s or len(s) > 80:
+                continue
+            if ":" not in s and "՝" not in s:
+                continue
+            k, v = re.split(r"[:՝]", s, 1)
+            k, v = clean(k), clean(v)
+            if not k or not v or len(k) > 30 or junk(v):
+                continue
+            if (k, v) not in specs:
+                specs.append((k, v))
+            if len(specs) >= 5:
+                return specs
+    return specs
+
 def item_data(sess, path):
     md = fetch(sess, BASE + path)
     if not md:
@@ -315,7 +339,7 @@ def item_data(sess, path):
             price = num + " " + mp.group(2)
 
     place = ""
-    m = re.search(r"Տեղ\W{0,3}\s*(.+)", md)
+    m = re.search(r"Տեղ\s*[:՝]\s*(.+)", md)
     if m:
         parts = [p.strip() for p in re.split(r"[—–]", clean(m.group(1))) if p.strip()]
         if parts:
@@ -359,6 +383,8 @@ def item_data(sess, path):
         if len(best) > 20:
             desc = best
 
+    specs = get_specs(md)
+
     photos = []
     names = set()
     for mi in IMG_RE.finditer(md):
@@ -373,11 +399,11 @@ def item_data(sess, path):
             names.add(name)
             photos.append(u)
 
-    print("  %s: фото %d, «%s», «%s», опис %d, обн «%s»"
-          % (path, len(photos), title[:40], price, len(desc), updated))
+    print("  %s: фото %d, «%s», «%s», бնութ. %d, опис %d, обн «%s»"
+          % (path, len(photos), title[:40], price, len(specs), len(desc), updated))
 
     return {"title": title, "price": price, "desc": desc, "place": place,
-            "phone": find_phone(md), "photos": photos[:10],
+            "phone": find_phone(md), "photos": photos[:10], "specs": specs,
             "posted": posted, "updated": updated, "stamp": stamp,
             "date": updated[:10] or posted[:10], "url": BASE + path}
 
@@ -398,6 +424,10 @@ def headline(sess, d):
 def make_caption(sess, d):
     head = clean(headline(sess, d))[:90]
 
+    blocks = []
+    if head:
+        blocks.append(head)
+
     meta = []
     if d.get("price"):
         p = money(d["price"])
@@ -407,20 +437,23 @@ def make_caption(sess, d):
         pl = clean(translate(sess, d["place"]))
         if pl:
             meta.append("Տեղ՝ " + pl[:60])
-    if d.get("phone"):
-        meta.append("Հեռախոս՝ " + d["phone"])
+    if meta:
+        blocks.append("\n".join(meta))
+
+    spec_lines = []
+    for k, v in (d.get("specs") or [])[:5]:
+        kk = clean(translate(sess, k))
+        vv = clean(translate(sess, v))
+        if kk and vv:
+            spec_lines.append((kk + "՝ " + vv)[:80])
+    if spec_lines:
+        blocks.append("\n".join(spec_lines))
 
     desc = clean(translate(sess, (d.get("desc") or "")[:400]))
     if head and desc.lower().startswith(head.lower()[:25]):
         desc = desc[len(head):].strip(" .,-")
     if head and head.strip(" .") == desc.strip(" ."):
         desc = ""
-
-    blocks = []
-    if head:
-        blocks.append(head)
-    if meta:
-        blocks.append("\n".join(meta))
     if desc:
         lines = []
         cur = ""
@@ -433,6 +466,9 @@ def make_caption(sess, d):
         if cur:
             lines.append(cur)
         blocks.append("\n".join(lines))
+
+    if d.get("phone"):
+        blocks.append("Հեռախոս՝ " + d["phone"])
 
     out = []
     for b in blocks:
@@ -540,7 +576,7 @@ def trim(st):
     if len(st["seen"]) > 50000:
         for k in list(st["seen"])[:20000]:
             st["seen"].pop(k, None)
-    if len(st["watch"]) > 5000:
+    if len(st.get("watch") or []) > 5000:
         st["watch"] = st["watch"][-3000:]
 
 def publish_one(sess, st, e, now):
@@ -650,7 +686,7 @@ def main():
         st["queue"] = []
         st[RESET_V] = True
         save(st)
-        print("հերթը մաքրվեց. նորից կլցվի միայն թույլատրված բաժիններից")
+        print("հերթը մաքրվեց")
 
     sess = requests.Session()
     now = time.time()
