@@ -3,8 +3,9 @@
 igma.am -> Telegram («Բարախոլկա Երևան»).
 
  - միայն վաճառքի բաժիններ
+ - էջը կարդացվում է UTF-8-ով, ուստի հայերենը չի վերածվում աղբի
  - «նմանատիպ հայտարարություններ» բլոկը կտրվում է
- - կետերով միայն կայքի աղյուսակն է, վաճառողի տեքստը՝ իր իսկ տեսքով
+ - կետերով միայն կայքի աղյուսակն է
  - նոր «Թարմացվել է»-ով հայտարարությունը նորից մտնում է հերթ
 """
 import os
@@ -73,12 +74,18 @@ SIM = ("Նմանատիպ", "Похожие", "Similar", "Այլ հայտարար
 DESC_HEAD = ("## Նկարագրություն", "## Описание")
 
 CARD_RE  = re.compile(r"\[!\[[^\]]*\]\(([^)]+)\)\]\((https://igma\.am/(?:[a-z]{2}/)?ads/(\d+))\)")
-PRICE_RE = re.compile(r"([\d][\d\s ]{0,12})\s*(֏|\$|€)")
+PRICE_RE = re.compile(r"([\d][^\d\s]{0,3}|\d[\d\s,]*)\s*(֏|֏|€|₽|\$|USD|AMD|доллар)")
 IMG_RE   = re.compile(r"!\[[^\]]*\]\((https?://[^)]+)\)")
 
 BAD = ("http", "www.", "igma.am", "размещено", "обновлено", "информация",
        "image", "аватар", "ավատար", "logo", "url", "статус", "категория",
        "տեղադրված", "թարմացվ", "цена")
+
+def decode(r):
+    try:
+        return r.content.decode("utf-8")
+    except UnicodeDecodeError:
+        return r.content.decode(r.apparent_encoding or "cp1251", errors="replace")
 
 def scrub(text):
     t = " ".join((text or "").split())
@@ -151,7 +158,7 @@ def via_proxy(url):
         try:
             r = requests.get(p, params={"url": url}, headers=HDRS, timeout=20)
             if r.status_code == 200:
-                t = to_md(r.text, url)
+                t = to_md(decode(r), url)
                 if t and len(t) > 1500:
                     return t
         except Exception:
@@ -161,8 +168,10 @@ def via_proxy(url):
 def fetch(sess, url):
     try:
         r = sess.get(url, headers=HDRS, timeout=15)
-        if r.status_code == 200 and good(r.text):
-            return to_md(r.text, url)
+        if r.status_code == 200:
+            html = decode(r)
+            if good(html):
+                return to_md(html, url)
     except Exception:
         pass
     h = dict(HDRS)
@@ -171,8 +180,10 @@ def fetch(sess, url):
         h["Authorization"] = "Bearer " + JINA_KEY
     try:
         r = sess.get("https://r.jina.ai/" + url, headers=h, timeout=25)
-        if r.status_code == 200 and good(r.text):
-            return r.text
+        if r.status_code == 200:
+            t = decode(r)
+            if good(t):
+                return t
     except Exception:
         pass
     t = via_proxy(url)
