@@ -19,7 +19,7 @@ REFILL_AT = 50
 MIN_JF    = 12
 STEP      = 8
 TRIES_MAX = 3
-VER       = 10
+VER       = 11
 
 PAUSE     = 2.5
 WAIT_429  = 45
@@ -44,7 +44,6 @@ DAYNUM_RE = re.compile(r"^\d{1,2}[\.\-/]")
 PHONE_RE = re.compile(r"(?:\+?374|\b0)[\s\-\(\)0-9]{7,18}")
 TEL_RE = re.compile(r"""tel:([+\d][\d\s\-\(\)]{6,20})""", re.I)
 JF_LINK = re.compile(r"/jobs/[a-z0-9\-]+/(\d+)", re.I)
-HASH_RE = re.compile(r"#[^\s#,;]+")
 
 FIELDS = ["Աշխատավայր", "Աշխատավարձ", "Դրույք", "Աշխատանքային գրաֆիկ",
           "Աշխատանքային փորձ", "Ոլորտ", "Վերջնաժամկետ"]
@@ -77,8 +76,8 @@ STOP_WORDS = ("Ընկերության մասին", "Տարածեք հայտար�
               "Օգտագործման պայմաններ", "օգտագործման պայմաններ",
               "Ծառայությունների մատուցման", "կայքի պայմաններ",
               "Գաղտնիության քաղաքականություն", "Բոլոր իրավունքները",
-              "Տեղեկացնում ենք", "Կայքը պատրաստված է",
-              "Դիմելու համար", "Կապ հաստատել")
+              "Կայքը պատրաստված է", "Օգտվելով մեր կայքից",
+              "Դուք ընդունում եք", "դուք համաձայնում եք")
 FORM = ("Անուն Ազգանուն", "Էլ. հասցե", "Նշեք գործող", "Լրացրեք դաշտերը",
         "Ուղարկել", "Կցել", "Ընտրեք ֆայլ", "Գրանցվել", "Ձեր անունը",
         "Հեռախոս *", "Ծածկագիր", "Դիմել այս")
@@ -87,6 +86,7 @@ JUNK = ("$", "(", ")", "{", "}", "[", "]", "->")
 BAD_TITLES = ("Նմանատիպ աշխատանքներ", "Ակտիվ աշխատանքներ",
               "Այլ աշխատանքներ", "Վերջին աշխատանքներ", "Աշխատանքներ")
 CAT_LINE = re.compile(r"^[Ա-Ֆա-ֆ\w\s,\-]+,\s*[Ա-Ֆա-ֆ]")
+CAT_BAD = ("կայք", "ընդունում", "պայման", "իրավունք", "հավելված", "ծառայություն")
 
 def get(sess, url):
     for attempt in range(TRIES_429):
@@ -132,6 +132,7 @@ def junk(s):
     return any(ch in s for ch in JUNK)
 
 def boiler(s):
+    """Կայքի իրավական/հավելվածային աղբը՝ ոչ վաճառողի տեքստը։"""
     low = (s or "").lower()
     return any(w.lower() in low for w in STOP_WORDS)
 
@@ -224,49 +225,36 @@ def field(block, label):
     return val
 
 def cats_of(t):
-    """Կայքի կատեգորիաների տողից հեշթեգներ."""
+    """Հեշթեգները՝ միայն կատեգորիաների տողից, առանց իրավական պիտակների։"""
     for line in t.split("\n"):
         low = clean(line)
-        if not low or len(low) > 120:
+        if not low or len(low) > 90 or low.count(",") < 1:
             continue
-        if not CAT_LINE.match(low) or low.count(",") < 1:
+        if not CAT_LINE.match(low):
             continue
-        if any(w.lower() in low.lower() for w in STOP_WORDS):
+        if any(w.lower() in low.lower() for w in CAT_BAD):
             continue
-        if re.search(r"\d{4}", low):
+        if re.search(r"\d", low) or "#" in low:
             continue
         tags = []
         for part in low.split(","):
             w = clean(part)
             if not w or len(w) > 22:
                 continue
-            w = w.replace(" ", "_")
-            tag = "#" + w
+            tag = "#" + w.replace(" ", "_")
             if tag not in tags:
                 tags.append(tag)
             if len(tags) >= 3:
                 break
-        if tags:
-            return tags, clean(low)
-    return [], ""
-
-def hash_of(t):
-    """Եթե կայքն ինքն է #պիտակ տալիս՝ վերցնում ենք դրանք։"""
-    found = []
-    for m in HASH_RE.finditer(t):
-        tag = m.group(0).rstrip(".,;:!?")
-        if tag not in found and len(tag) <= 26:
-            found.append(tag)
-        if len(found) >= 3:
-            break
-    return found
+        if len(tags) >= 2:
+            return tags
+    return []
 
 def tags_of(ind, t):
-    h = hash_of(t)
-    if h:
-        return h
-    tags, cats = cats_of(t)
-    return tags
+    tags = cats_of(t)
+    if tags:
+        return tags
+    return []
 
 def is_armenian(title, body):
     armenian = len(ARM.findall(title)) * 3 + len(ARM.findall(body))
@@ -341,7 +329,7 @@ def parse_am(html_text, path):
         if not low or low in STOP_LINES:
             continue
         if boiler(low):
-            continue
+            break
         if any(f in low for f in FORM):
             break
         bare = low.lstrip("—–-•·🔺 ")
@@ -360,7 +348,7 @@ def parse_am(html_text, path):
                 cur[1].append(rest)
         elif cur is not None:
             item = clean(low.lstrip("—-•·–🔺"))
-            if not item or item in STOP_LINES or boiler(item):
+            if not item or item in STOP_LINES:
                 continue
             add_item(cur, item)
 
@@ -393,7 +381,6 @@ def parse_am(html_text, path):
             clean_sections = [("Նկարագրություն", plain)]
 
     ind = field(block, "Ոլորտ")
-    tags = tags_of(ind, t)
 
     return {
         "id": path.rstrip("/").split("-")[-1],
@@ -408,7 +395,7 @@ def parse_am(html_text, path):
         "deadline": deadline_of(t),
         "phones": phones_of(html_text, t),
         "sections": clean_sections,
-        "tags": tags,
+        "tags": tags_of(ind, t),
         "hy": is_armenian(title, body),
         "cat": cat_of(ind),
     }
@@ -445,7 +432,7 @@ def parse_jf(html_text, pid):
         if started and (low.startswith("Դիմել") or low.startswith("Ընկերության մասին")):
             break
         if boiler(low):
-            continue
+            break
         if not started or cur is None:
             continue
         it = clean(low.lstrip("-–•—🔺 "))
