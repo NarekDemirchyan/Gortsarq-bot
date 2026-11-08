@@ -19,7 +19,7 @@ REFILL_AT = 50
 MIN_JF    = 12
 STEP      = 8
 TRIES_MAX = 3
-VER       = 7
+VER       = 8
 
 BULLET = "🔺"
 
@@ -239,7 +239,7 @@ def add_item(cur, item):
     elif len(item) > 3:
         cur[1].append(item[:400])
 
-def make_caption(d, link=""):
+def make_caption(d):
     L = ["<b>%s</b>" % esc(d["title"])]
     if d["company"]:
         L.append(esc(d["company"]))
@@ -259,8 +259,6 @@ def make_caption(d, link=""):
         L.append("⏳ Վերջնաժամկետ՝ %s" % d["deadline"])
     if d["phones"]:
         L.append("📞 Հեռ.՝ %s" % esc(", ".join(d["phones"])))
-    elif link:
-        L.append("🔗 Դիմելու համար՝ %s" % link)
     if d["tags"]:
         L.append("")
         L.append(" ".join(d["tags"]))
@@ -475,12 +473,23 @@ def fill_am(sess, st, n):
         if not h:
             continue
         d = parse_am(h, path)
-        if not d["hy"] or expired(d["deadline"]) or not d["title"]:
+        if not d["hy"]:
             st["seen"][jid] = 1
-            print("  am բաց թողնված՝", jid, "| hy" if not d["hy"] else
-                  ("| ժամկետ" if expired(d["deadline"]) else "| վերնագիր"))
+            print("  am բաց թողնված՝", jid, "| ոչ հայերեն")
             continue
-        text = make_caption(d, BASE + path if not d["phones"] else "")
+        if not d["phones"]:
+            st["seen"][jid] = 1
+            print("  am բաց թողնված՝", jid, "| համար չկա")
+            continue
+        if expired(d["deadline"]):
+            st["seen"][jid] = 1
+            print("  am բաց թողնված՝", jid, "| ժամկետը լրացել է")
+            continue
+        if not d["title"]:
+            st["seen"][jid] = 1
+            print("  am բաց թողնված՝", jid, "| վերնագիր չկա")
+            continue
+        text = make_caption(d)
         if fps.get(fp_of(text)):
             st["seen"][jid] = 1
             print("  am կրկնություն՝", jid)
@@ -521,6 +530,8 @@ def fill_jf(sess, st, n):
             bad = "վերնագիր չկա"
         elif not d["hy"]:
             bad = "ոչ հայերեն"
+        elif not d["phones"]:
+            bad = "համար չկա"
         elif expired(d["deadline"]):
             bad = "ժամկետը լրացել է"
         if bad:
@@ -528,8 +539,7 @@ def fill_jf(sess, st, n):
             print("  jf բաց թողնված՝", pid, "|", bad)
             continue
 
-        link = "https://jobfinder.am/jobs/x/%s" % pid
-        text = make_caption(d, link if not d["phones"] else "")
+        text = make_caption(d)
         if fps.get(fp_of(text)):
             st["seen"][pid] = 1
             print("  jf կրկնություն՝", pid)
@@ -554,6 +564,7 @@ def load():
         st["seen"] = {}
         st["jam_list"] = []
         st["jf_list"] = []
+        st["queue"] = []
         st["ver"] = VER
     return st
 
@@ -597,15 +608,11 @@ def publish(sess, st):
             h = get(sess, base + item["path"])
             if h:
                 d = parse_jf(h, item["id"]) if item.get("site") == "jf" else parse_am(h, item["path"])
-                if expired(d["deadline"]) or not d["hy"] or not d["title"]:
+                if expired(d["deadline"]) or not d["hy"] or not d["title"] or not d["phones"]:
                     drop_id(st, item)
                     skips += 1
                     continue
-                link = ""
-                if not d["phones"]:
-                    link = ("https://jobfinder.am/jobs/x/%s" % item["id"]
-                            if item.get("site") == "jf" else BASE + item["path"])
-                text = make_caption(d, link)
+                text = make_caption(d)
                 item["text"] = text
                 item["v"] = VER
                 save(st)
