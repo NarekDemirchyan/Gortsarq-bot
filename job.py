@@ -19,11 +19,11 @@ REFILL_AT = 50
 MIN_JF    = 12
 STEP      = 8
 TRIES_MAX = 3
-VER       = 9
+VER       = 10
 
-PAUSE     = 2.5     # դադար էջերի միջև
-WAIT_429  = 45      # սպասում 429-ից հետո
-TRIES_429 = 3       # քանի անգամ փորձել 429-ի դեպքում
+PAUSE     = 2.5
+WAIT_429  = 45
+TRIES_429 = 3
 
 BULLET = "🔺"
 
@@ -44,6 +44,7 @@ DAYNUM_RE = re.compile(r"^\d{1,2}[\.\-/]")
 PHONE_RE = re.compile(r"(?:\+?374|\b0)[\s\-\(\)0-9]{7,18}")
 TEL_RE = re.compile(r"""tel:([+\d][\d\s\-\(\)]{6,20})""", re.I)
 JF_LINK = re.compile(r"/jobs/[a-z0-9\-]+/(\d+)", re.I)
+HASH_RE = re.compile(r"#[^\s#,;]+")
 
 FIELDS = ["Աշխատավայր", "Աշխատավարձ", "Դրույք", "Աշխատանքային գրաֆիկ",
           "Աշխատանքային փորձ", "Ոլորտ", "Վերջնաժամկետ"]
@@ -71,7 +72,13 @@ JF_HEADS = {"Աշխատանքի նկարագրությունը": "Նկարագր
             "Վարձատրություն և պայմաններ": "Հավելյալ նշումներ",
             "Լրացուցիչ տեղեկություններ": "Հավելյալ նշումներ"}
 STOP_LINES = ("Ամբողջությամբ կարդալ", "Տեսնել ավելին", "Դիմել", "Կարդալ ավելին")
-STOP_WORDS = ("Ընկերության մասին", "Տարածեք հայտարարությունը")
+STOP_WORDS = ("Ընկերության մասին", "Տարածեք հայտարարությունը",
+              "Ներբեռնեք", "ներբեռնեք", "անվճար հավելված",
+              "Օգտագործման պայմաններ", "օգտագործման պայմաններ",
+              "Ծառայությունների մատուցման", "կայքի պայմաններ",
+              "Գաղտնիության քաղաքականություն", "Բոլոր իրավունքները",
+              "Տեղեկացնում ենք", "Կայքը պատրաստված է",
+              "Դիմելու համար", "Կապ հաստատել")
 FORM = ("Անուն Ազգանուն", "Էլ. հասցե", "Նշեք գործող", "Լրացրեք դաշտերը",
         "Ուղարկել", "Կցել", "Ընտրեք ֆայլ", "Գրանցվել", "Ձեր անունը",
         "Հեռախոս *", "Ծածկագիր", "Դիմել այս")
@@ -79,6 +86,7 @@ SENT_END = (".", ":", "!", "?", "։", "»", ";", "…")
 JUNK = ("$", "(", ")", "{", "}", "[", "]", "->")
 BAD_TITLES = ("Նմանատիպ աշխատանքներ", "Ակտիվ աշխատանքներ",
               "Այլ աշխատանքներ", "Վերջին աշխատանքներ", "Աշխատանքներ")
+CAT_LINE = re.compile(r"^[Ա-Ֆա-ֆ\w\s,\-]+,\s*[Ա-Ֆա-ֆ]")
 
 def get(sess, url):
     for attempt in range(TRIES_429):
@@ -122,6 +130,10 @@ def esc(s):
 
 def junk(s):
     return any(ch in s for ch in JUNK)
+
+def boiler(s):
+    low = (s or "").lower()
+    return any(w.lower() in low for w in STOP_WORDS)
 
 def money(s):
     s = clean(s or "")
@@ -211,25 +223,50 @@ def field(block, label):
         return ""
     return val
 
-def tags_of(ind, n=3):
-    tags = []
-    for part in re.split(r"[,;/]", ind or ""):
-        words = []
-        for w in clean(part).split():
-            if words and w[:1].isupper():
-                break
-            words.append(w)
-        if not words:
+def cats_of(t):
+    """Կայքի կատեգորիաների տողից հեշթեգներ."""
+    for line in t.split("\n"):
+        low = clean(line)
+        if not low or len(low) > 120:
             continue
-        tag = "#" + "_".join(words[:3])
-        if len(tag) > 26:
-            tag = tag[:26]
-        if tag not in tags and len(tags) < n:
-            tags.append(tag)
-    return tags
+        if not CAT_LINE.match(low) or low.count(",") < 1:
+            continue
+        if any(w.lower() in low.lower() for w in STOP_WORDS):
+            continue
+        if re.search(r"\d{4}", low):
+            continue
+        tags = []
+        for part in low.split(","):
+            w = clean(part)
+            if not w or len(w) > 22:
+                continue
+            w = w.replace(" ", "_")
+            tag = "#" + w
+            if tag not in tags:
+                tags.append(tag)
+            if len(tags) >= 3:
+                break
+        if tags:
+            return tags, clean(low)
+    return [], ""
 
-def cat_of(ind):
-    return clean(re.split(r"[,;/]", ind)[0]) if ind else "այլ"
+def hash_of(t):
+    """Եթե կայքն ինքն է #պիտակ տալիս՝ վերցնում ենք դրանք։"""
+    found = []
+    for m in HASH_RE.finditer(t):
+        tag = m.group(0).rstrip(".,;:!?")
+        if tag not in found and len(tag) <= 26:
+            found.append(tag)
+        if len(found) >= 3:
+            break
+    return found
+
+def tags_of(ind, t):
+    h = hash_of(t)
+    if h:
+        return h
+    tags, cats = cats_of(t)
+    return tags
 
 def is_armenian(title, body):
     armenian = len(ARM.findall(title)) * 3 + len(ARM.findall(body))
@@ -303,6 +340,8 @@ def parse_am(html_text, path):
         low = clean(line)
         if not low or low in STOP_LINES:
             continue
+        if boiler(low):
+            continue
         if any(f in low for f in FORM):
             break
         bare = low.lstrip("—–-•·🔺 ")
@@ -321,7 +360,7 @@ def parse_am(html_text, path):
                 cur[1].append(rest)
         elif cur is not None:
             item = clean(low.lstrip("—-•·–🔺"))
-            if not item or item in STOP_LINES:
+            if not item or item in STOP_LINES or boiler(item):
                 continue
             add_item(cur, item)
 
@@ -332,7 +371,7 @@ def parse_am(html_text, path):
     for head, items in sections:
         uniq = []
         for it in items:
-            if it not in uniq and ARM.search(it):
+            if it not in uniq and ARM.search(it) and not boiler(it):
                 uniq.append(it)
         uniq = uniq[:limits.get(head, 8)]
         if uniq:
@@ -342,7 +381,7 @@ def parse_am(html_text, path):
         plain = []
         for line in body.split("\n"):
             low = clean(line.lstrip("—-•·–🔺"))
-            if not low or low in STOP_LINES or low == title:
+            if not low or low in STOP_LINES or low == title or boiler(low):
                 continue
             if any(f in low for f in FORM):
                 break
@@ -354,6 +393,7 @@ def parse_am(html_text, path):
             clean_sections = [("Նկարագրություն", plain)]
 
     ind = field(block, "Ոլորտ")
+    tags = tags_of(ind, t)
 
     return {
         "id": path.rstrip("/").split("-")[-1],
@@ -368,7 +408,7 @@ def parse_am(html_text, path):
         "deadline": deadline_of(t),
         "phones": phones_of(html_text, t),
         "sections": clean_sections,
-        "tags": tags_of(ind),
+        "tags": tags,
         "hy": is_armenian(title, body),
         "cat": cat_of(ind),
     }
@@ -404,6 +444,8 @@ def parse_jf(html_text, pid):
             continue
         if started and (low.startswith("Դիմել") or low.startswith("Ընկերության մասին")):
             break
+        if boiler(low):
+            continue
         if not started or cur is None:
             continue
         it = clean(low.lstrip("-–•—🔺 "))
@@ -418,7 +460,7 @@ def parse_jf(html_text, pid):
     for head, items in sections:
         uniq = []
         for it in items:
-            if it not in uniq:
+            if it not in uniq and not boiler(it):
                 uniq.append(it)
         uniq = uniq[:limits.get(head, 8)]
         if uniq:
@@ -437,10 +479,13 @@ def parse_jf(html_text, pid):
         "deadline": deadline_of(t),
         "phones": phones_of(html_text, t),
         "sections": clean_sections,
-        "tags": tags_of(ind),
+        "tags": tags_of(ind, t),
         "hy": is_armenian(title, t),
         "cat": cat_of(ind),
     }
+
+def cat_of(ind):
+    return clean(re.split(r"[,;/]", ind)[0]) if ind else "այլ"
 
 def listing(sess):
     h = get(sess, SITEMAP)
@@ -662,11 +707,9 @@ def collect(sess, st):
         return
 
     jf = sum(1 for it in q if it.get("site") == "jf")
-    am = len(q) - jf
 
     part = []
 
-    # jobfinder-ը միշտ լիցքավորում ենք մինչև MIN_JF, անկախ job.am-ի հերթից
     if jf < MIN_JF:
         part += fill_jf(sess, st, MIN_JF - jf)
 
