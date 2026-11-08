@@ -19,7 +19,11 @@ REFILL_AT = 50
 MIN_JF    = 12
 STEP      = 8
 TRIES_MAX = 3
-VER       = 8
+VER       = 9
+
+PAUSE     = 2.5     # դադար էջերի միջև
+WAIT_429  = 45      # սպասում 429-ից հետո
+TRIES_429 = 3       # քանի անգամ փորձել 429-ի դեպքում
 
 BULLET = "🔺"
 
@@ -77,16 +81,22 @@ BAD_TITLES = ("Նմանատիպ աշխատանքներ", "Ակտիվ աշխատ�
               "Այլ աշխատանքներ", "Վերջին աշխատանքներ", "Աշխատանքներ")
 
 def get(sess, url):
-    for _ in range(2):
+    for attempt in range(TRIES_429):
         try:
             r = sess.get(url, headers=HDRS, timeout=45)
             if r.status_code == 200 and len(r.text) > 2000:
                 return r.text
+            if r.status_code == 429:
+                print("  պատասխան 429, սպասում", WAIT_429, "վրկ |", url)
+                time.sleep(WAIT_429 * (attempt + 1))
+                continue
             if r.status_code not in (404, 410):
                 print("  պատասխան", r.status_code, url)
             break
         except Exception as e:
             print("  ցանցի սխալ", type(e).__name__, url)
+            time.sleep(3)
+    print("  չկարդացվեց (429/սխալ), թողնում եմ հաջորդ վազքի |", url)
     return ""
 
 def text_of(h):
@@ -453,10 +463,14 @@ def listing(sess):
 
 def jf_listing(sess):
     h = get(sess, BASE2 + "/hy/jobs")
+    if not h:
+        print("  jobfinder ցանկը չբացվեց")
+        return []
     ids = []
-    for x in JF_LINK.findall(h or ""):
+    for x in JF_LINK.findall(h):
         if x not in ids:
             ids.append(x)
+    print("jf ցանկ՝", len(ids))
     return ids
 
 def fill_am(sess, st, n):
@@ -496,28 +510,27 @@ def fill_am(sess, st, n):
             continue
         out.append({"path": path, "id": jid, "cat": d["cat"], "site": "am",
                     "text": text})
-        time.sleep(1)
+        time.sleep(PAUSE)
     save(st)
     return out
 
 def fill_jf(sess, st, n):
     fps = st.setdefault("fps", {})
     out, tries = [], 0
-    while len(out) < n and tries < 25:
+    while len(out) < n and tries < 30:
         if not st.get("jf_list"):
             fresh = [x for x in jf_listing(sess)
                      if x not in st["seen"] and x not in st["published"]]
             if not fresh:
+                print("  jf՝ նոր հայտարարություն չմնաց")
                 break
             st["jf_list"] = fresh
-            print("jf ցանկ՝", len(fresh))
         pid = st["jf_list"].pop(0)
         tries += 1
         if pid in st["seen"] or pid in st["published"]:
             continue
         h = get(sess, BASE2 + "/jobs/x/" + pid)
         if not h:
-            st["seen"][pid] = 1
             continue
         try:
             d = parse_jf(h, pid)
@@ -547,7 +560,7 @@ def fill_jf(sess, st, n):
 
         out.append({"path": "/jobs/x/" + pid, "id": pid, "cat": d["cat"], "site": "jf",
                     "text": text})
-        time.sleep(1)
+        time.sleep(PAUSE)
     save(st)
     return out
 
@@ -651,24 +664,17 @@ def collect(sess, st):
     jf = sum(1 for it in q if it.get("site") == "jf")
     am = len(q) - jf
 
-    if len(q) >= REFILL_AT and jf >= MIN_JF:
-        return
+    part = []
 
-    turn = st.get("turn", 0)
-    if jf < MIN_JF and am >= jf:
-        fn = fill_jf
-    elif am < jf:
-        fn = fill_am
-    else:
-        fn = fill_jf if turn % 2 == 0 else fill_am
-    st["turn"] = turn + 1
+    # jobfinder-ը միշտ լիցքավորում ենք մինչև MIN_JF, անկախ job.am-ի հերթից
+    if jf < MIN_JF:
+        part += fill_jf(sess, st, MIN_JF - jf)
 
-    part = fn(sess, st, STEP)
-    if not part and len(st["queue"]) < REFILL_AT:
-        other = fill_am if fn is fill_jf else fill_jf
-        part = other(sess, st, STEP)
+    if len(q) < REFILL_AT:
+        part += fill_am(sess, st, STEP)
 
     have = {it.get("id") for it in st["queue"]}
+    added = 0
     for it in part:
         if len(st["queue"]) >= QUEUE_MAX:
             break
@@ -677,10 +683,11 @@ def collect(sess, st):
         it["v"] = VER
         st["queue"].append(it)
         have.add(it["id"])
+        added += 1
     save(st)
 
     jf_now = sum(1 for it in st["queue"] if it.get("site") == "jf")
-    print("հերթագրված՝", len(part), "| հերթ:", len(st["queue"]), "| jobfinder՝", jf_now)
+    print("հերթագրված՝", added, "| հերթ:", len(st["queue"]), "| jobfinder՝", jf_now)
 
 def main():
     st = load()
