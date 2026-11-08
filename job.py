@@ -19,7 +19,7 @@ REFILL_AT = 50
 MIN_JF    = 12
 STEP      = 8
 TRIES_MAX = 3
-VER       = 6
+VER       = 7
 
 BULLET = "🔺"
 
@@ -35,7 +35,6 @@ ARM = re.compile(r"[\u0531-\u0587]")
 LAT = re.compile(r"[A-Za-z]")
 SITE_RE = re.compile(r"<loc>\s*(https?://job\.am/hy/job/[^<\s]+?)\s*</loc>"
                      r"\s*<lastmod>\s*(\d{4}-\d{2}-\d{2})", re.I)
-DATE_RE = re.compile(r"(\d{2})\.(\d{2})\.(\d{4})")
 DATE_ANY = re.compile(r"(\d{1,2})[./\-](\d{1,2})[./\-](\d{4})")
 DAYNUM_RE = re.compile(r"^\d{1,2}[\.\-/]")
 PHONE_RE = re.compile(r"(?:\+?374|\b0)[\s\-\(\)0-9]{7,18}")
@@ -222,6 +221,13 @@ def tags_of(ind, n=3):
 def cat_of(ind):
     return clean(re.split(r"[,;/]", ind)[0]) if ind else "այլ"
 
+def is_armenian(title, body):
+    armenian = len(ARM.findall(title)) * 3 + len(ARM.findall(body))
+    latin = len(LAT.findall(body))
+    if armenian < 30:
+        return False
+    return armenian >= latin * 0.6
+
 def join_ok(prev):
     return bool(prev) and not prev.rstrip().endswith(SENT_END)
 
@@ -233,7 +239,7 @@ def add_item(cur, item):
     elif len(item) > 3:
         cur[1].append(item[:400])
 
-def make_caption(d):
+def make_caption(d, link=""):
     L = ["<b>%s</b>" % esc(d["title"])]
     if d["company"]:
         L.append(esc(d["company"]))
@@ -253,6 +259,8 @@ def make_caption(d):
         L.append("⏳ Վերջնաժամկետ՝ %s" % d["deadline"])
     if d["phones"]:
         L.append("📞 Հեռ.՝ %s" % esc(", ".join(d["phones"])))
+    elif link:
+        L.append("🔗 Դիմելու համար՝ %s" % link)
     if d["tags"]:
         L.append("")
         L.append(" ".join(d["tags"]))
@@ -338,8 +346,6 @@ def parse_am(html_text, path):
             clean_sections = [("Նկարագրություն", plain)]
 
     ind = field(block, "Ոլորտ")
-    armenian = len(ARM.findall(title)) * 3 + len(ARM.findall(body))
-    latin = len(LAT.findall(body))
 
     return {
         "id": path.rstrip("/").split("-")[-1],
@@ -355,7 +361,7 @@ def parse_am(html_text, path):
         "phones": phones_of(html_text, t),
         "sections": clean_sections,
         "tags": tags_of(ind),
-        "hy": armenian >= 30 and armenian >= latin,
+        "hy": is_armenian(title, body),
         "cat": cat_of(ind),
     }
 
@@ -410,9 +416,6 @@ def parse_jf(html_text, pid):
         if uniq:
             clean_sections.append((head, uniq))
 
-    armenian = len(ARM.findall(title)) * 3 + len(ARM.findall(t))
-    latin = len(LAT.findall(t))
-
     return {
         "id": str(pid),
         "title": title[:90],
@@ -427,7 +430,7 @@ def parse_jf(html_text, pid):
         "phones": phones_of(html_text, t),
         "sections": clean_sections,
         "tags": tags_of(ind),
-        "hy": armenian >= 30 and armenian >= latin,
+        "hy": is_armenian(title, t),
         "cat": cat_of(ind),
     }
 
@@ -472,11 +475,12 @@ def fill_am(sess, st, n):
         if not h:
             continue
         d = parse_am(h, path)
-        if not d["hy"] or not d["phones"] or expired(d["deadline"]) or not d["title"]:
+        if not d["hy"] or expired(d["deadline"]) or not d["title"]:
             st["seen"][jid] = 1
-            print("  am բաց թողնված՝", jid)
+            print("  am բաց թողնված՝", jid, "| hy" if not d["hy"] else
+                  ("| ժամկետ" if expired(d["deadline"]) else "| վերնագիր"))
             continue
-        text = make_caption(d)
+        text = make_caption(d, BASE + path if not d["phones"] else "")
         if fps.get(fp_of(text)):
             st["seen"][jid] = 1
             print("  am կրկնություն՝", jid)
@@ -524,13 +528,12 @@ def fill_jf(sess, st, n):
             print("  jf բաց թողնված՝", pid, "|", bad)
             continue
 
-        text = make_caption(d)
+        link = "https://jobfinder.am/jobs/x/%s" % pid
+        text = make_caption(d, link if not d["phones"] else "")
         if fps.get(fp_of(text)):
             st["seen"][pid] = 1
             print("  jf կրկնություն՝", pid)
             continue
-        if not d["phones"]:
-            text += "\n🔗 Դիմելու համար՝ https://jobfinder.am/jobs/x/%s" % pid
 
         out.append({"path": "/jobs/x/" + pid, "id": pid, "cat": d["cat"], "site": "jf",
                     "text": text})
@@ -549,6 +552,7 @@ def load():
     st.setdefault("fps", {})
     if st.get("ver") != VER:
         st["seen"] = {}
+        st["jam_list"] = []
         st["jf_list"] = []
         st["ver"] = VER
     return st
@@ -597,9 +601,11 @@ def publish(sess, st):
                     drop_id(st, item)
                     skips += 1
                     continue
-                text = make_caption(d)
+                link = ""
                 if not d["phones"]:
-                    text += "\n🔗 Դիմելու համար՝ https://jobfinder.am/jobs/x/%s" % item["id"]
+                    link = ("https://jobfinder.am/jobs/x/%s" % item["id"]
+                            if item.get("site") == "jf" else BASE + item["path"])
+                text = make_caption(d, link)
                 item["text"] = text
                 item["v"] = VER
                 save(st)
