@@ -19,7 +19,7 @@ REFILL_AT = 50
 MIN_JF    = 12
 STEP      = 8
 TRIES_MAX = 3
-VER       = 11
+VER       = 12
 
 PAUSE     = 2.5
 WAIT_429  = 45
@@ -61,12 +61,18 @@ HEAD_ALIASES = {
     "Պարտադիր պահանջներ": "Պահանջներ",
 }
 JF_HEADS = {"Աշխատանքի նկարագրությունը": "Նկարագրություն",
+            "Աշխատանքի նկարագրություն": "Նկարագրություն",
+            "Աշխատանքի Նկարագրությունը": "Նկարագրություն",
             "Ինչ ենք առաջարկում": "Առավելություններ",
             "Մեր առաջարկը": "Առավելություններ",
             "Առավելություններ": "Առավելություններ",
             "Աշխատանքային պարտականությունները": "Պարտականություններ",
+            "Աշխատանքային պարտականություններ": "Պարտականություններ",
+            "Պարտականությունները": "Պարտականություններ",
             "Պարտականություններ": "Պարտականություններ",
+            "Պահանջվող որակավորումները": "Պահանջներ",
             "Պահանջվող որակավորումներ": "Պահանջներ",
+            "Պահանջները": "Պահանջներ",
             "Պահանջներ": "Պահանջներ",
             "Վարձատրություն և պայմաններ": "Հավելյալ նշումներ",
             "Լրացուցիչ տեղեկություններ": "Հավելյալ նշումներ"}
@@ -77,7 +83,8 @@ STOP_WORDS = ("Ընկերության մասին", "Տարածեք հայտար�
               "Ծառայությունների մատուցման", "կայքի պայմաններ",
               "Գաղտնիության քաղաքականություն", "Բոլոր իրավունքները",
               "Կայքը պատրաստված է", "Օգտվելով մեր կայքից",
-              "Դուք ընդունում եք", "դուք համաձայնում եք")
+              "Դուք ընդունում եք", "դուք համաձայնում եք",
+              "Եթե արդեն գրանցված եք")
 FORM = ("Անուն Ազգանուն", "Էլ. հասցե", "Նշեք գործող", "Լրացրեք դաշտերը",
         "Ուղարկել", "Կցել", "Ընտրեք ֆայլ", "Գրանցվել", "Ձեր անունը",
         "Հեռախոս *", "Ծածկագիր", "Դիմել այս")
@@ -87,6 +94,8 @@ BAD_TITLES = ("Նմանատիպ աշխատանքներ", "Ակտիվ աշխատ�
               "Այլ աշխատանքներ", "Վերջին աշխատանքներ", "Աշխատանքներ")
 CAT_LINE = re.compile(r"^[Ա-Ֆա-ֆ\w\s,\-]+,\s*[Ա-Ֆա-ֆ]")
 CAT_BAD = ("կայք", "ընդունում", "պայման", "իրավունք", "հավելված", "ծառայություն")
+JF_META = ("Աշխատանքի տեսակը", "Վայրը", "Սեռ", "Կրթություն", "Ոլորտ",
+           "Նախընտրելի տարիք", "Աշխատավարձ", "Վերջնաժամկետ", "Հեռ")
 
 def get(sess, url):
     for attempt in range(TRIES_429):
@@ -132,7 +141,6 @@ def junk(s):
     return any(ch in s for ch in JUNK)
 
 def boiler(s):
-    """Կայքի իրավական/հավելվածային աղբը՝ ոչ վաճառողի տեքստը։"""
     low = (s or "").lower()
     return any(w.lower() in low for w in STOP_WORDS)
 
@@ -153,7 +161,7 @@ def expired(dl):
     if not dl:
         return False
     try:
-        d, m, y = [int(x) for x in dl.split(".")]
+        d, m, y = [int(x) for x in re.split(r"[./\-]", dl)]
         return (y, m, d) < time.gmtime(time.time() + 4 * 3600)[:3]
     except Exception:
         return False
@@ -225,7 +233,6 @@ def field(block, label):
     return val
 
 def cats_of(t):
-    """Հեշթեգները՝ միայն կատեգորիաների տողից, առանց իրավական պիտակների։"""
     for line in t.split("\n"):
         low = clean(line)
         if not low or len(low) > 90 or low.count(",") < 1:
@@ -248,12 +255,6 @@ def cats_of(t):
                 break
         if len(tags) >= 2:
             return tags
-    return []
-
-def tags_of(ind, t):
-    tags = cats_of(t)
-    if tags:
-        return tags
     return []
 
 def is_armenian(title, body):
@@ -395,10 +396,77 @@ def parse_am(html_text, path):
         "deadline": deadline_of(t),
         "phones": phones_of(html_text, t),
         "sections": clean_sections,
-        "tags": tags_of(ind, t),
+        "tags": cats_of(t),
         "hy": is_armenian(title, body),
         "cat": cat_of(ind),
     }
+
+def jf_sections(t):
+    """jobfinder.am. վերնագրերից առաջ եկող տեքստը՝ Նկարագրություն։"""
+    lines = [clean(x) for x in t.split("\n")]
+    lines = [x for x in lines if x]
+
+    sections, cur, started, intro = [], None, False, []
+
+    for line in lines:
+        head = JF_HEADS.get(line)
+        if head is None:
+            for k, v in JF_HEADS.items():
+                if line.startswith(k) and len(line) - len(k) < 60:
+                    head = v
+                    rest0 = clean(line[len(k):])
+                    break
+            else:
+                rest0 = ""
+        else:
+            rest0 = ""
+
+        if head:
+            if not started and intro:
+                first = [x for x in intro if ARM.search(x) and not boiler(x)][:4]
+                if first:
+                    sections.append(("Նկարագրություն", first))
+            started = True
+            cur = [head, []]
+            sections.append(cur)
+            if rest0:
+                add_item(cur, rest0.lstrip("`:\u0589 "))
+            continue
+
+        if started and (line.startswith("Դիմել") or line.startswith("Ընկերության մասին")):
+            break
+        if started and boiler(line):
+            break
+
+        if not started:
+            if any(line.startswith(x) for x in JF_META):
+                continue
+            if re.search(r"\d{2}[./]\d{2}[./]\d{4}", line):
+                continue
+            if len(intro) < 12:
+                intro.append(line)
+            continue
+
+        if cur is None:
+            continue
+        it = clean(line.lstrip("-–•—🔺 "))
+        if not it or not ARM.search(it) or len(it) < 3:
+            continue
+        add_item(cur, it)
+
+    limits = {"Նկարագրություն": 4, "Առավելություններ": 10,
+              "Պարտականություններ": 12, "Պահանջներ": 12,
+              "Հավելյալ նշումներ": 8}
+    out = []
+    for head, items in sections:
+        uniq = []
+        for it in items:
+            if it not in uniq and not boiler(it):
+                uniq.append(it)
+        uniq = uniq[:limits.get(head, 8)]
+        if uniq:
+            out.append((head, uniq))
+    return out
 
 def parse_jf(html_text, pid):
     t = text_of(html_text)
@@ -412,46 +480,14 @@ def parse_jf(html_text, pid):
             break
 
     def lab(name):
-        m = re.search(re.escape(name) + r"\s*`?\s*([^\n]{0,200})", t)
+        m = re.search(re.escape(name) + r"\s*`?\s*:\s*([^\n]{0,200})", t)
         val = clean(m.group(1)) if m else ""
         return "" if junk(val) else val
 
     ind = lab("Ոլորտ")
-    place = lab("Վայրը").replace(",", ", ")
+    place = lab("Վայրը").replace(",", ", ").replace("Հայաստան, ", "")
 
-    sections, cur, started = [], None, False
-    for line in t.split("\n"):
-        low = clean(line)
-        if not low:
-            continue
-        if low in JF_HEADS:
-            cur = [JF_HEADS[low], []]
-            sections.append(cur)
-            started = True
-            continue
-        if started and (low.startswith("Դիմել") or low.startswith("Ընկերության մասին")):
-            break
-        if boiler(low):
-            break
-        if not started or cur is None:
-            continue
-        it = clean(low.lstrip("-–•—🔺 "))
-        if not it or not ARM.search(it) or len(it) < 3:
-            continue
-        add_item(cur, it)
-
-    limits = {"Նկարագրություն": 4, "Առավելություններ": 10,
-              "Պարտականություններ": 12, "Պահանջներ": 12,
-              "Հավելյալ նշումներ": 8}
-    clean_sections = []
-    for head, items in sections:
-        uniq = []
-        for it in items:
-            if it not in uniq and not boiler(it):
-                uniq.append(it)
-        uniq = uniq[:limits.get(head, 8)]
-        if uniq:
-            clean_sections.append((head, uniq))
+    sections = jf_sections(t)
 
     return {
         "id": str(pid),
@@ -465,8 +501,8 @@ def parse_jf(html_text, pid):
         "ind": ind[:90],
         "deadline": deadline_of(t),
         "phones": phones_of(html_text, t),
-        "sections": clean_sections,
-        "tags": tags_of(ind, t),
+        "sections": sections,
+        "tags": cats_of(t),
         "hy": is_armenian(title, t),
         "cat": cat_of(ind),
     }
