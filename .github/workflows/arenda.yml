@@ -23,8 +23,12 @@ jobs:
 
       - name: Install
         run: |
-          pip install requests markdownify playwright
-          python -m playwright install --with-deps chromium
+          pip install --quiet requests markdownify playwright
+
+      - name: Install chromium
+        continue-on-error: true
+        run: |
+          python -m playwright install chromium
 
       - name: Check syntax
         run: |
