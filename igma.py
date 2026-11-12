@@ -7,6 +7,7 @@ igma.am -> Telegram («Բարախոլկա Երևան»).
  - «նմանատիպ հայտարարություններ» բլոկը կտրվում է
  - կետերով միայն կայքի աղյուսակն է
  - նոր «Թարմացվել է»-ով հայտարարությունը նորից մտնում է հերթ
+ - առանց նկարի հայտարարությունը չի հրապարակվում
 """
 import os
 import re
@@ -525,22 +526,24 @@ def tg_post(sess, method, data, files=None, timeout=60):
     return None
 
 def send(sess, d, caption):
+    if not (d.get("photos") or []):
+        print("  նկար չկա, չհրապարակված՝", d.get("url"))
+        return False
+
     blobs = []
     for u in (d.get("photos") or [])[:10]:
         b = photo_bytes(sess, u, d["url"])
         if b and len(b) <= MAXP:
             blobs.append(b)
 
+    if not blobs:
+        print("  նկարները չներբեռնվեցին, չհրապարակված՝", d.get("url"))
+        return False
+
     markup = {"inline_keyboard": [
         [{"text": "Связаться", "url": d["url"]}],
         [{"text": "☺️Поддержать группу", "url": GROUP_BOOST}],
     ]}
-
-    if not blobs:
-        r = tg_post(sess, "sendMessage",
-                    {"chat_id": CHAT_ID, "text": caption,
-                     "reply_markup": json.dumps(markup)})
-        return r is not None
 
     if len(blobs) >= 2:
         files = {"p%d" % i: ("p%d.jpg" % i, b) for i, b in enumerate(blobs)}
@@ -633,6 +636,11 @@ def publish_one(sess, st, e, now):
         d["price"] = e["price"]
     if not d.get("photos") and e.get("photo"):
         d["photos"] = [e["photo"]]
+
+    if not (d.get("photos") or []):
+        st["seen"][path] = True
+        print("  առանց նկարի, բաց թողնված՝", path)
+        return "drop"
 
     cap = make_caption(sess, d)
     if not cap.strip():
