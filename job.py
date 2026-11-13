@@ -19,7 +19,7 @@ REFILL_AT = 50
 MIN_JF    = 12
 STEP      = 8
 TRIES_MAX = 3
-VER        = 15
+VER        = 17
 SEEN_DAYS  = 7
 JF_PAGES   = 6
 
@@ -94,12 +94,15 @@ JUNK = ("$", "(", ")", "{", "}", "[", "]", "->")
 BAD_TITLES = ("Նմանատիպ աշխատանքներ", "Ակտիվ աշխատանքներ",
               "Այլ աշխատանքներ", "Վերջին աշխատանքներ", "Աշխատանքներ")
 JF_META = ("Աշխատանքի տեսակը", "Վայրը", "Սեռ", "Կրթություն", "Ոլորտ",
-           "Նախընտրելի տարիք", "Աշխատավարձ", "Վերջնաժամկետ", "Հեռ")
+           "Նախընտրելի տարիք", "Աշխատավարձ", "Վերջնաժամկետ", "Հեռ",
+           "Վերջնաժամկետը", "Հեռ.")
 INTRO_BAD = ("նախընտրությամբ", "պահանջվում է", "պահանջվում են",
-             "աշխատավարձ", "հասցե", "աշխատանքային օրեր", "ժամեր")
+             "աշխատավարձ՝", "հասցե՝", "աշխատանքային օրեր՝")
 TAG_STOP = ("որ", "և", "կամ", "մեջ", "համար", "մասին", "հետ", "առանց",
             "աշխատանք", "աշխատող", "մասնագետ", "աշխատակից", "ընկերություն",
-            "հայաստան", "երևան", "մարզ", "քաղաք", "թաղամաս", "պաշտոն")
+            "հայաստան", "երևան", "մարզ", "քաղաք", "թաղամաս", "պաշտոն",
+            "պահանջվում", "հրավիրվում")
+PLACE_LINE = re.compile(r"^[\u0531-\u0587\s\-]+,\s*[\u0531-\u0587\s\-]+$")
 
 def get(sess, url):
     for attempt in range(TRIES_429):
@@ -135,7 +138,7 @@ def text_of(h):
     return "\n".join(out)
 
 def clean(s):
-    s = re.sub(r"\s+", " ", s or "").strip(" `:,;")
+    s = re.sub(r"\s+", " ", s or "").strip(" `:,;»\"'")
     return re.sub(r"[,;։]+$", "", s).strip()
 
 def esc(s):
@@ -237,7 +240,6 @@ def field(block, label):
     return val
 
 def tags_of(title, ind=""):
-    """Հեշթեգները՝ վերնագրից և ոլորտից, ոչ քաղաքից։"""
     tags = []
     src = re.split(r"[|/(–—-]", clean(title or ""))[0]
     for w in re.split(r"[\s,]+", src):
@@ -288,13 +290,18 @@ def make_caption(d):
     L = ["<b>%s</b>" % esc(d["title"])]
     if d["company"]:
         L.append(esc(d["company"]))
-    L.append("")
+    meta = []
     for k, v in (("Աշխատավայր", d["place"]), ("Աշխատավարձ", d["salary"]),
                  ("Դրույք", d["type"]), ("Գրաֆիկ", d["sched"]),
                  ("Փորձ", d["exp"]), ("Ոլորտ", d["ind"])):
         if v:
-            L.append("• %s՝ %s" % (k, esc(v)))
+            meta.append("• %s՝ %s" % (k, esc(v)))
+    if meta:
+        L.append("")
+        L.extend(meta)
     for head, items in d["sections"]:
+        if not items:
+            continue
         L.append("")
         L.append("🔹 <b>%s</b>" % esc(head))
         for it in items:
@@ -307,7 +314,10 @@ def make_caption(d):
     if d["tags"]:
         L.append("")
         L.append(" ".join(d["tags"]))
-    return "\n".join(L).strip()[:4000]
+    out = "\n".join(L).strip()
+    while "\n\n\n" in out:
+        out = out.replace("\n\n\n", "\n\n")
+    return out[:4000]
 
 def cat_of(ind):
     return clean(re.split(r"[,;/]", ind)[0]) if ind else "այլ"
@@ -417,15 +427,26 @@ def jf_sections(t, title="", company=""):
     lines = [clean(x) for x in t.split("\n")]
     lines = [x for x in lines if x]
 
+    meta = [clean(title).lower(), clean(company).lower()]
     sections, cur, started, intro = [], None, False, []
-    meta = [clean(title), clean(company)]
 
     for line in lines:
-        if line.startswith("JobFinder") or "| JobFinder" in line:
+        low = line.lower()
+        core = re.sub(r"\s+", " ", low).strip(" «»\"'")
+        if "jobfinder" in low:
             continue
-        if line in meta:
+        if core in meta:
             continue
-        if re.fullmatch(r"[\u0531-\u0587\s]+[,;]\s*[\u0531-\u0587\s]+", line or "") and line.count(",") == 1:
+        if any(m and (core.startswith(m) or m.startswith(core)) and len(core) > 6
+               for m in meta if m):
+            continue
+        if PLACE_LINE.match(line):
+            continue
+        if low in [x.lower() for x in JF_META]:
+            continue
+        if line in STOP_LINES or any(f in line for f in FORM):
+            continue
+        if "ստեղծել" in low or "ռեզյումե" in low or "տեղադրել հայտարարություն" in low:
             continue
 
         head = JF_HEADS.get(line)
@@ -439,15 +460,9 @@ def jf_sections(t, title="", company=""):
 
         if head:
             if not started and intro:
-                first = []
-                for x in intro:
-                    if not ARM.search(x) or boiler(x):
-                        continue
-                    if any(x.lower().startswith(b) for b in INTRO_BAD):
-                        continue
-                    first.append(x)
+                first = [x for x in intro if ARM.search(x) and not boiler(x)]
                 if first:
-                    sections.append(("Նկարագրություն", first[:4]))
+                    sections.append(("Նկարագրություն", first[:5]))
             started = True
             cur = [head, []]
             sections.append(cur)
@@ -465,9 +480,9 @@ def jf_sections(t, title="", company=""):
                 continue
             if re.search(r"\d{2}[./]\d{2}[./]\d{4}", line):
                 continue
-            if any(line.lower().startswith(b) for b in INTRO_BAD):
+            if any(low.startswith(b) for b in INTRO_BAD):
                 continue
-            if len(intro) < 12:
+            if len(intro) < 14 and line not in intro:
                 intro.append(line)
             continue
 
@@ -478,7 +493,7 @@ def jf_sections(t, title="", company=""):
             continue
         add_item(cur, it)
 
-    limits = {"Նկարագրություն": 4, "Առավելություններ": 10,
+    limits = {"Նկարագրություն": 6, "Առավելություններ": 10,
               "Պարտականություններ": 12, "Պահանջներ": 12,
               "Հավելյալ նշումներ": 8}
     out = []
@@ -785,7 +800,6 @@ def collect(sess, st):
 
     part = []
 
-    # հավասարեցնում ենք. ով քիչ է, նրանից ավելացնում ենք
     if jf < MIN_JF or jf <= am:
         part += fill_jf(sess, st, MIN_JF if jf <= am else 4)
 
