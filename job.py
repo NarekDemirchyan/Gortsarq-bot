@@ -19,9 +19,9 @@ REFILL_AT = 50
 MIN_JF    = 12
 STEP      = 8
 TRIES_MAX = 3
-VER        = 14
+VER        = 15
 SEEN_DAYS  = 7
-JF_PAGES   = 4
+JF_PAGES   = 6
 
 PAUSE     = 2.5
 WAIT_429  = 45
@@ -93,12 +93,13 @@ SENT_END = (".", ":", "!", "?", "։", "»", ";", "…")
 JUNK = ("$", "(", ")", "{", "}", "[", "]", "->")
 BAD_TITLES = ("Նմանատիպ աշխատանքներ", "Ակտիվ աշխատանքներ",
               "Այլ աշխատանքներ", "Վերջին աշխատանքներ", "Աշխատանքներ")
-CAT_LINE = re.compile(r"^[Ա-Ֆա-ֆ\w\s,\-]+,\s*[Ա-Ֆա-ֆ]")
-CAT_BAD = ("կայք", "ընդունում", "պայման", "իրավունք", "հավելված", "ծառայություն")
 JF_META = ("Աշխատանքի տեսակը", "Վայրը", "Սեռ", "Կրթություն", "Ոլորտ",
            "Նախընտրելի տարիք", "Աշխատավարձ", "Վերջնաժամկետ", "Հեռ")
 INTRO_BAD = ("նախընտրությամբ", "պահանջվում է", "պահանջվում են",
              "աշխատավարձ", "հասցե", "աշխատանքային օրեր", "ժամեր")
+TAG_STOP = ("որ", "և", "կամ", "մեջ", "համար", "մասին", "հետ", "առանց",
+            "աշխատանք", "աշխատող", "մասնագետ", "աշխատակից", "ընկերություն",
+            "հայաստան", "երևան", "մարզ", "քաղաք", "թաղամաս", "պաշտոն")
 
 def get(sess, url):
     for attempt in range(TRIES_429):
@@ -235,30 +236,35 @@ def field(block, label):
         return ""
     return val
 
-def cats_of(t):
-    for line in t.split("\n"):
-        low = clean(line)
-        if not low or len(low) > 90 or low.count(",") < 1:
+def tags_of(title, ind=""):
+    """Հեշթեգները՝ վերնագրից և ոլորտից, ոչ քաղաքից։"""
+    tags = []
+    src = re.split(r"[|/(–—-]", clean(title or ""))[0]
+    for w in re.split(r"[\s,]+", src):
+        w = clean(w)
+        if len(w) < 4 or len(w) > 22:
             continue
-        if not CAT_LINE.match(low):
+        if not ARM.search(w):
             continue
-        if any(w.lower() in low.lower() for w in CAT_BAD):
+        if w.lower() in TAG_STOP:
             continue
-        if re.search(r"\d", low) or "#" in low:
-            continue
-        tags = []
-        for part in low.split(","):
-            w = clean(part)
-            if not w or len(w) > 22:
-                continue
-            tag = "#" + w.replace(" ", "_")
-            if tag not in tags:
-                tags.append(tag)
-            if len(tags) >= 3:
-                break
+        t = "#" + w.replace(" ", "_")
+        if t not in tags:
+            tags.append(t)
         if len(tags) >= 2:
-            return tags
-    return []
+            break
+    for part in re.split(r"[,;/]", clean(ind or "")):
+        w = clean(part)
+        if len(w) < 5 or len(w) > 22 or not ARM.search(w):
+            continue
+        if w.lower() in TAG_STOP:
+            continue
+        t = "#" + w.replace(" ", "_")
+        if t not in tags:
+            tags.append(t)
+        if len(tags) >= 3:
+            break
+    return tags[:3]
 
 def is_armenian(title, body):
     armenian = len(ARM.findall(title)) * 3 + len(ARM.findall(body))
@@ -402,18 +408,26 @@ def parse_am(html_text, path):
         "deadline": deadline_of(t),
         "phones": phones_of(html_text, t),
         "sections": clean_sections,
-        "tags": cats_of(t),
+        "tags": tags_of(title, ind),
         "hy": is_armenian(title, body),
         "cat": cat_of(ind),
     }
 
-def jf_sections(t):
+def jf_sections(t, title="", company=""):
     lines = [clean(x) for x in t.split("\n")]
     lines = [x for x in lines if x]
 
     sections, cur, started, intro = [], None, False, []
+    meta = [clean(title), clean(company)]
 
     for line in lines:
+        if line.startswith("JobFinder") or "| JobFinder" in line:
+            continue
+        if line in meta:
+            continue
+        if re.fullmatch(r"[\u0531-\u0587\s]+[,;]\s*[\u0531-\u0587\s]+", line or "") and line.count(",") == 1:
+            continue
+
         head = JF_HEADS.get(line)
         rest0 = ""
         if head is None:
@@ -490,7 +504,8 @@ def parse_jf(html_text, pid):
             break
 
     def lab(name):
-        m = re.search(re.escape(name) + r"\s*`?\s*:\s*([^\n]{0,200})", t)
+        m = re.search(re.escape(name) +
+r"\s*`?\s*:\s*([^\n]{0,200})", t)
         val = clean(m.group(1)) if m else ""
         return "" if junk(val) else val
 
@@ -509,8 +524,8 @@ def parse_jf(html_text, pid):
         "ind": ind[:90],
         "deadline": deadline_of(t),
         "phones": phones_of(html_text, t),
-        "sections": jf_sections(t),
-        "tags": cats_of(t),
+        "sections": jf_sections(t, title, company),
+        "tags": tags_of(title, ind),
         "hy": is_armenian(title, t),
         "cat": cat_of(ind),
     }
@@ -765,14 +780,16 @@ def collect(sess, st):
     if len(q) >= QUEUE_MAX:
         return
 
+    am = sum(1 for it in q if it.get("site") != "jf")
     jf = sum(1 for it in q if it.get("site") == "jf")
 
     part = []
 
-    if jf < MIN_JF:
-        part += fill_jf(sess, st, MIN_JF - jf)
+    # հավասարեցնում ենք. ով քիչ է, նրանից ավելացնում ենք
+    if jf < MIN_JF or jf <= am:
+        part += fill_jf(sess, st, MIN_JF if jf <= am else 4)
 
-    if len(q) < REFILL_AT:
+    if len(q) < REFILL_AT and am <= jf + 2:
         part += fill_am(sess, st, STEP)
 
     have = {it.get("id") for it in st["queue"]}
@@ -788,8 +805,10 @@ def collect(sess, st):
         added += 1
     save(st)
 
+    am_now = sum(1 for it in st["queue"] if it.get("site") != "jf")
     jf_now = sum(1 for it in st["queue"] if it.get("site") == "jf")
-    print("հերթագրված՝", added, "| հերթ:", len(st["queue"]), "| jobfinder՝", jf_now)
+    print("հերթագրված՝", added, "| հերթ:", len(st["queue"]),
+          "| job.am՝", am_now, "| jobfinder՝", jf_now)
 
 def main():
     st = load()
