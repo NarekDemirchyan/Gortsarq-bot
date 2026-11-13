@@ -19,7 +19,7 @@ REFILL_AT = 50
 MIN_JF    = 12
 STEP      = 8
 TRIES_MAX = 3
-VER        = 13
+VER        = 14
 SEEN_DAYS  = 7
 JF_PAGES   = 4
 
@@ -303,6 +303,9 @@ def make_caption(d):
         L.append(" ".join(d["tags"]))
     return "\n".join(L).strip()[:4000]
 
+def cat_of(ind):
+    return clean(re.split(r"[,;/]", ind)[0]) if ind else "այլ"
+
 def parse_am(html_text, path):
     t = text_of(html_text)
     title = title_of(html_text, ("h1", "h2"))
@@ -403,3 +406,408 @@ def parse_am(html_text, path):
         "hy": is_armenian(title, body),
         "cat": cat_of(ind),
     }
+
+def jf_sections(t):
+    lines = [clean(x) for x in t.split("\n")]
+    lines = [x for x in lines if x]
+
+    sections, cur, started, intro = [], None, False, []
+
+    for line in lines:
+        head = JF_HEADS.get(line)
+        rest0 = ""
+        if head is None:
+            for k, v in JF_HEADS.items():
+                if line.startswith(k) and len(line) - len(k) < 60:
+                    head = v
+                    rest0 = clean(line[len(k):])
+                    break
+
+        if head:
+            if not started and intro:
+                first = []
+                for x in intro:
+                    if not ARM.search(x) or boiler(x):
+                        continue
+                    if any(x.lower().startswith(b) for b in INTRO_BAD):
+                        continue
+                    first.append(x)
+                if first:
+                    sections.append(("Նկարագրություն", first[:4]))
+            started = True
+            cur = [head, []]
+            sections.append(cur)
+            if rest0:
+                add_item(cur, rest0.lstrip("`:\u0589 "))
+            continue
+
+        if started and (line.startswith("Դիմել") or line.startswith("Ընկերության մասին")):
+            break
+        if started and boiler(line):
+            break
+
+        if not started:
+            if any(line.startswith(x) for x in JF_META):
+                continue
+            if re.search(r"\d{2}[./]\d{2}[./]\d{4}", line):
+                continue
+            if any(line.lower().startswith(b) for b in INTRO_BAD):
+                continue
+            if len(intro) < 12:
+                intro.append(line)
+            continue
+
+        if cur is None:
+            continue
+        it = clean(line.lstrip("-–•—🔺 "))
+        if not it or not ARM.search(it) or len(it) < 3:
+            continue
+        add_item(cur, it)
+
+    limits = {"Նկարագրություն": 4, "Առավելություններ": 10,
+              "Պարտականություններ": 12, "Պահանջներ": 12,
+              "Հավելյալ նշումներ": 8}
+    out = []
+    for head, items in sections:
+        uniq = []
+        for it in items:
+            if it not in uniq and not boiler(it):
+                uniq.append(it)
+        uniq = uniq[:limits.get(head, 8)]
+        if uniq:
+            out.append((head, uniq))
+    return out
+
+def parse_jf(html_text, pid):
+    t = text_of(html_text)
+    title = title_of(html_text, ("h1", "h2", "h3", "h4", "h5"))
+
+    company = ""
+    for m in re.finditer(r'(?is)<a[^>]+href="[^"]*?/company/[^"]*"[^>]*>(.*?)</a>', html_text):
+        cand = clean(text_of(m.group(1)))
+        if cand:
+            company = cand
+            break
+
+    def lab(name):
+        m = re.search(re.escape(name) + r"\s*`?\s*:\s*([^\n]{0,200})", t)
+        val = clean(m.group(1)) if m else ""
+        return "" if junk(val) else val
+
+    ind = lab("Ոլորտ")
+    place = lab("Վայրը").replace(",", ", ").replace("Հայաստան, ", "")
+
+    return {
+        "id": str(pid),
+        "title": title[:90],
+        "company": company[:70],
+        "place": place[:70],
+        "salary": money(lab("Աշխատավարձ"))[:60],
+        "type": lab("Աշխատանքի տեսակը")[:50],
+        "sched": lab("Գրաֆիկ")[:70],
+        "exp": lab("Փորձ")[:50],
+        "ind": ind[:90],
+        "deadline": deadline_of(t),
+        "phones": phones_of(html_text, t),
+        "sections": jf_sections(t),
+        "tags": cats_of(t),
+        "hy": is_armenian(title, t),
+        "cat": cat_of(ind),
+    }
+
+def listing(sess):
+    h = get(sess, SITEMAP)
+    if not h:
+        return []
+    edge = time.strftime("%Y-%m-%d",
+                         time.gmtime(time.time() + 4 * 3600 - DAYS * 86400))
+    order, seen = [], set()
+    for m in SITE_RE.finditer(h):
+        url, mod = m.group(1), m.group(2)
+        if mod < edge:
+            continue
+        path = url.replace(BASE, "")
+        if path in seen:
+            continue
+        seen.add(path)
+        order.append(path)
+    print("sitemap՝", len(order))
+    return order
+
+def jf_listing(sess):
+    ids = []
+    for page in range(1, JF_PAGES + 1):
+        url = BASE2 + "/hy/jobs" if page == 1 else BASE2 + "/hy/jobs?page=%d" % page
+        h = get(sess, url)
+        if not h:
+            print("  jobfinder էջ", page, "չբացվեց")
+            break
+        new = 0
+        for x in JF_LINK.findall(h):
+            if x not in ids:
+                ids.append(x)
+                new += 1
+        print("  jf էջ", page, "->", new)
+        if new == 0:
+            break
+        time.sleep(PAUSE)
+    print("jf ցանկ՝", len(ids))
+    return ids
+
+def fill_am(sess, st, n):
+    if not st.get("jam_list"):
+        st["jam_list"] = listing(sess)
+    fps = st.setdefault("fps", {})
+    out = []
+    while st["jam_list"] and len(out) < n:
+        path = st["jam_list"].pop(0)
+        jid = path.rstrip("/").split("-")[-1]
+        if jid in st["seen"] or jid in st["published"]:
+            continue
+        h = get(sess, BASE + path)
+        if not h:
+            continue
+        d = parse_am(h, path)
+        if not d["hy"]:
+            st["seen"][jid] = 1
+            st["seen_at"][jid] = time.time()
+            print("  am բաց թողնված՝", jid, "| ոչ հայերեն")
+            continue
+        if not d["phones"]:
+            st["seen"][jid] = 1
+            st["seen_at"][jid] = time.time()
+            print("  am բաց թողնված՝", jid, "| համար չկա")
+            continue
+        if expired(d["deadline"]):
+            st["seen"][jid] = 1
+            st["seen_at"][jid] = time.time()
+            print("  am բաց թողնված՝", jid, "| ժամկետը լրացել է")
+            continue
+        if not d["title"]:
+            st["seen"][jid] = 1
+            st["seen_at"][jid] = time.time()
+            print("  am բաց թողնված՝", jid, "| վերնագիր չկա")
+            continue
+        text = make_caption(d)
+        if fps.get(fp_of(text)):
+            st["seen"][jid] = 1
+            st["seen_at"][jid] = time.time()
+            print("  am կրկնություն՝", jid)
+            continue
+        out.append({"path": path, "id": jid, "cat": d["cat"], "site": "am",
+                    "text": text})
+        time.sleep(PAUSE)
+    save(st)
+    return out
+
+def fill_jf(sess, st, n):
+    fps = st.setdefault("fps", {})
+    out, tries = [], 0
+    while len(out) < n and tries < 40:
+        if not st.get("jf_list"):
+            fresh = [x for x in jf_listing(sess)
+                     if x not in st["seen"] and x not in st["published"]]
+            if not fresh:
+                print("  jf՝ նոր հայտարարություն չմնաց (այս պահին)")
+                break
+            st["jf_list"] = fresh
+        pid = st["jf_list"].pop(0)
+        tries += 1
+        if pid in st["seen"] or pid in st["published"]:
+            continue
+        h = get(sess, BASE2 + "/jobs/x/" + pid)
+        if not h:
+            continue
+        try:
+            d = parse_jf(h, pid)
+        except Exception:
+            st["seen"][pid] = 1
+            st["seen_at"][pid] = time.time()
+            continue
+
+        bad = ""
+        if not d["title"]:
+            bad = "վերնագիր չկա"
+        elif not d["hy"]:
+            bad = "ոչ հայերեն"
+        elif not d["phones"]:
+            bad = "համար չկա"
+        elif expired(d["deadline"]):
+            bad = "ժամկետը լրացել է"
+        if bad:
+            st["seen"][pid] = 1
+            st["seen_at"][pid] = time.time()
+            print("  jf բաց թողնված՝", pid, "|", bad)
+            continue
+
+        text = make_caption(d)
+        if fps.get(fp_of(text)):
+            st["seen"][pid] = 1
+            st["seen_at"][pid] = time.time()
+            print("  jf կրկնություն՝", pid)
+            continue
+
+        out.append({"path": "/jobs/x/" + pid, "id": pid, "cat": d["cat"], "site": "jf",
+                    "text": text})
+        time.sleep(PAUSE)
+    save(st)
+    return out
+
+def prune(st):
+    now = time.time()
+    stamps = st.setdefault("seen_at", {})
+    for k in list(st["seen"].keys()):
+        stamps.setdefault(k, now)
+    old = [k for k, ts in stamps.items() if now - ts > SEEN_DAYS * 86400]
+    for k in old:
+        st["seen"].pop(k, None)
+        stamps.pop(k, None)
+    if old:
+        print("seen մաքրված՝", len(old))
+
+def load():
+    try:
+        st = json.load(open(STATE, encoding="utf-8"))
+    except Exception:
+        st = {}
+    st.setdefault("queue", [])
+    st.setdefault("seen", {})
+    st.setdefault("published", {})
+    st.setdefault("fps", {})
+    st.setdefault("seen_at", {})
+    if st.get("ver") != VER:
+        st["seen"] = {}
+        st["seen_at"] = {}
+        st["jam_list"] = []
+        st["jf_list"] = []
+        st["queue"] = []
+        st["ver"] = VER
+    return st
+
+def save(st):
+    json.dump(st, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
+
+def send(sess, text):
+    try:
+        r = sess.post("https://api.telegram.org/bot%s/sendMessage" % TOKEN,
+                      data={"chat_id": CHANNEL, "text": text, "parse_mode": "HTML",
+                            "disable_web_page_preview": "true"}, timeout=40)
+        print("telegram:", r.status_code, r.text[:200])
+        return r.ok
+    except Exception as e:
+        print("telegram սխալ", type(e).__name__)
+        return False
+
+def pick(st):
+    q = st["queue"]
+    last = st.get("last_site")
+    if last:
+        for i, it in enumerate(q):
+            if it.get("site", "am") != last:
+                return i
+    return 0
+
+def drop_id(st, item):
+    st["seen"][item["id"]] = 1
+    st.setdefault("seen_at", {})[item["id"]] = time.time()
+    st["queue"] = [x for x in st["queue"] if x.get("id") != item["id"]]
+    save(st)
+
+def publish(sess, st):
+    tried, skips = 0, 0
+    while st["queue"] and tried < TRIES_MAX and skips < 60:
+        idx = pick(st)
+        item = st["queue"][idx]
+        text = item.get("text") or ""
+
+        if item.get("v") != VER:
+            base = BASE2 if item.get("site") == "jf" else BASE
+            h = get(sess, base + item["path"])
+            if h:
+                d = parse_jf(h, item["id"]) if item.get("site") == "jf" else parse_am(h, item["path"])
+                if expired(d["deadline"]) or not d["hy"] or not d["title"] or not d["phones"]:
+                    drop_id(st, item)
+                    skips += 1
+                    continue
+                text = make_caption(d)
+                item["text"] = text
+                item["v"] = VER
+                save(st)
+            elif not text:
+                print("  տեքստ դեռ չկա, հերթը մնում է նույնը")
+                return False
+
+        fps = st.setdefault("fps", {})
+        mk = fp_of(text)
+        if fps.get(mk):
+            drop_id(st, item)
+            skips += 1
+            print("  նույն հայտարարությունն արդեն եղել է, բաց թողնված")
+            continue
+
+        tried += 1
+        if send(sess, text):
+            st["published"][item["id"]] = 1
+            st["last_site"] = item.get("site", "am")
+            fps[mk] = 1
+            st["queue"] = [x for x in st["queue"] if x.get("id") != item["id"]]
+            save(st)
+            print("հրապարակված՝", item["id"], item.get("site", "am"))
+            return True
+        print("  չուղարկվեց, մնում է հերթում")
+        return False
+
+    print("ուշադրություն՝ ոչինչ չհրապարակվեց,", tried, "փորձ,", skips, "կրկնություն | հերթ:", len(st["queue"]))
+    return False
+
+def collect(sess, st):
+    q = st["queue"]
+    if len(q) >= QUEUE_MAX:
+        return
+
+    jf = sum(1 for it in q if it.get("site") == "jf")
+
+    part = []
+
+    if jf < MIN_JF:
+        part += fill_jf(sess, st, MIN_JF - jf)
+
+    if len(q) < REFILL_AT:
+        part += fill_am(sess, st, STEP)
+
+    have = {it.get("id") for it in st["queue"]}
+    added = 0
+    for it in part:
+        if len(st["queue"]) >= QUEUE_MAX:
+            break
+        if it["id"] in have:
+            continue
+        it["v"] = VER
+        st["queue"].append(it)
+        have.add(it["id"])
+        added += 1
+    save(st)
+
+    jf_now = sum(1 for it in st["queue"] if it.get("site") == "jf")
+    print("հերթագրված՝", added, "| հերթ:", len(st["queue"]), "| jobfinder՝", jf_now)
+
+def main():
+    st = load()
+    prune(st)
+    sess = requests.Session()
+    mode = sys.argv[1].strip().lower() if len(sys.argv) > 1 else ""
+
+    if mode == "test":
+        for fn in (fill_am, fill_jf):
+            for it in fn(sess, st, 2):
+                print("-" * 40)
+                print("աղբյուր՝", it["site"], "| id՝", it["id"])
+                print(it["text"])
+        return
+
+    collect(sess, st)
+    publish(sess, st)
+    print("վերջ. հերթում՝", len(st["queue"]))
+
+if __name__ == "__main__":
+    main()
