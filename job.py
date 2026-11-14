@@ -13,15 +13,20 @@ BASE    = "https://job.am"
 SITEMAP = "https://job.am/sitemap/jobs.xml"
 BASE2   = "https://jobfinder.am"
 
+TZ_OFFSET  = 4          # Երևան (UTC+4)
+HOUR_FROM  = 8          # հրապարակումը սկսվում է 08:00
+HOUR_TO    = 23         # մինչև 23:59
+DAY_HOURS  = HOUR_TO - HOUR_FROM + 1
+
 DAYS      = 30
 QUEUE_MAX = 200
 REFILL_AT = 50
 MIN_JF    = 12
 STEP      = 8
 TRIES_MAX = 3
-VER        = 17
+VER        = 18
 SEEN_DAYS  = 7
-JF_PAGES   = 6
+JF_PAGES   = 12
 
 PAUSE     = 2.5
 WAIT_429  = 45
@@ -104,6 +109,13 @@ TAG_STOP = ("որ", "և", "կամ", "մեջ", "համար", "մասին", "հե�
             "պահանջվում", "հրավիրվում")
 PLACE_LINE = re.compile(r"^[\u0531-\u0587\s\-]+,\s*[\u0531-\u0587\s\-]+$")
 
+def local_now():
+    return time.gmtime(time.time() + TZ_OFFSET * 3600)
+
+def publish_window():
+    h = local_now().tm_hour
+    return HOUR_FROM <= h <= HOUR_TO
+
 def get(sess, url):
     for attempt in range(TRIES_429):
         try:
@@ -169,7 +181,7 @@ def expired(dl):
         return False
     try:
         d, m, y = [int(x) for x in re.split(r"[./\-]", dl)]
-        return (y, m, d) < time.gmtime(time.time() + 4 * 3600)[:3]
+        return (y, m, d) < local_now()[:3]
     except Exception:
         return False
 
@@ -550,7 +562,7 @@ def listing(sess):
     if not h:
         return []
     edge = time.strftime("%Y-%m-%d",
-                         time.gmtime(time.time() + 4 * 3600 - DAYS * 86400))
+                         time.gmtime(time.time() + TZ_OFFSET * 3600 - DAYS * 86400))
     order, seen = [], set()
     for m in SITE_RE.finditer(h):
         url, mod = m.group(1), m.group(2)
@@ -565,7 +577,7 @@ def listing(sess):
     return order
 
 def jf_listing(sess):
-    ids = []
+    ids, empty = [], 0
     for page in range(1, JF_PAGES + 1):
         url = BASE2 + "/hy/jobs" if page == 1 else BASE2 + "/hy/jobs?page=%d" % page
         h = get(sess, url)
@@ -579,7 +591,11 @@ def jf_listing(sess):
                 new += 1
         print("  jf էջ", page, "->", new)
         if new == 0:
-            break
+            empty += 1
+            if empty >= 2:
+                break
+            continue
+        empty = 0
         time.sleep(PAUSE)
     print("jf ցանկ՝", len(ids))
     return ids
@@ -800,11 +816,12 @@ def collect(sess, st):
 
     part = []
 
-    if jf < MIN_JF or jf <= am:
-        part += fill_jf(sess, st, MIN_JF if jf <= am else 4)
+    if am < STEP:
+        part += fill_am(sess, st, STEP - am)
 
-    if len(q) < REFILL_AT and am <= jf + 2:
-        part += fill_am(sess, st, STEP)
+    need_jf = MIN_JF - jf - len([x for x in part if x.get("site") == "jf"])
+    if need_jf > 0:
+        part += fill_jf(sess, st, need_jf)
 
     have = {it.get("id") for it in st["queue"]}
     added = 0
@@ -838,8 +855,16 @@ def main():
                 print(it["text"])
         return
 
-    collect(sess, st)
+    if not publish_window():
+        collect(sess, st)
+        print("գիշերային ժամ, չի հրապարակվում. հերթում՝", len(st["queue"]))
+        return
+
     publish(sess, st)
+
+    if len(st["queue"]) < REFILL_AT:
+        collect(sess, st)
+
     print("վերջ. հերթում՝", len(st["queue"]))
 
 if __name__ == "__main__":
