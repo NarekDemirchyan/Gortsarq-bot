@@ -342,7 +342,7 @@ def main():
         n = len(st["seen"])
         st["seen"] = {}
         print("память о просмотренных очищена:", n)
-if isinstance(st["seen"], list):
+    if isinstance(st["seen"], list):
         st["seen"] = {i: "" for i in st["seen"]}
     st.setdefault("queue", [])
     st.setdefault("failed", {})
