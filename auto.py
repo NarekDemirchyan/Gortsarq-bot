@@ -97,9 +97,9 @@ def get_ids(sess):
     seen = set()
     for sm in SITEMAPS:
         xml = fetch_sitemap(sess, sm)
-        for block in re.findall(r"<url>(.*?)</url>", xml, re.S):
+                for block in re.findall(r"<url>(.*?)</url>", xml, re.S):
             m = re.search(r"auto\.am/(?:ru/|en/)?offer/(\d+)", block)
-if not m:
+            if not m:
                 continue
             iid = m.group(1)
             if iid in seen:
