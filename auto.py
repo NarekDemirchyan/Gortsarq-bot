@@ -10,13 +10,13 @@ QUEUE_MAX  = 2000         # максимум объявлений в очере�
 FRESH_DAYS = 7            # берём объявления за последние 7 суток
 RESET_ONCE = True         # однократный сброс очереди, сработает один раз
 TEST       = False
+ONLY_PRIVATE = True       # True — публикуем только частных продавцов, дилеров пропускаем
 
 JINA = "https://r.jina.ai/"
 BASE = "https://auto.am"
 SITEMAPS = [f"{BASE}/sitemaps/offers-{i}.xml" for i in range(1, 11)]
 HDRS = {"User-Agent": "curl/8.5.0"}
 
-# для картинок — обычный браузерный заголовок, иначе сайт отдаёт заглушку
 IMG_HDRS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
@@ -27,7 +27,6 @@ DATE_RE = re.compile(r"<lastmod>(\d{4}-\d{2}-\d{2})")
 BLOCKED = ("just a moment", "attention required", "enable javascript",
            "checking your browser", "cloudflare")
 
-# один снимок в трёх размерах: полный (без приставки), m- и s-
 PHOTO_RE = re.compile(
     r"https://auto\.am/static/offers/(\d+)/(?:[ms]-)?([0-9a-f]{8,})\.(webp|jpg|jpeg|png)",
     re.I)
@@ -64,7 +63,6 @@ def today_iso():
     return time.strftime("%Y-%m-%d", time.gmtime(time.time() + 4 * 3600))
 
 def last_days(n):
-    # даты сайта (ГГГГ-ММ-ДД) за последние n суток по Еревану (UTC+4)
     out = set()
     base = time.time() + 4 * 3600
     for k in range(n + 1):
@@ -106,7 +104,7 @@ def get_ids(sess):
             d = DATE_RE.search(block)
             items.append((iid, d.group(1) if d else ""))
         print(f"  {sm.rsplit('/', 1)[-1]}: всего {len(items)} объявлений")
-        time.sleep(5)
+time.sleep(5)
     return items
 
 # ---------- фотографии ----------
@@ -118,55 +116,58 @@ def photo_urls(u):
         return [u]
     base = f"https://auto.am/static/offers/{m.group(1)}/"
     h = m.group(2).lower()
-    ext = m.group(3).lower()
-    return [f"{base}{h}.{ext}", f"{base}m-{h}.{ext}", f"{base}s-{h}.{ext}"]
+    out = [f"{base}{h}.{m.group(3).lower()}"]
+    for pre in ("m-", "s-"):
+        out.append(f"{base}{pre}{h}.{m.group(3).lower()}")
+    return out
 
 def collect_photos(md, iid):
-    out, seen = [], set()
-    for m in PHOTO_RE.finditer(md):
+    wow = []
+    seen = set()
+    for m in PHOTO_RE.finditer(md or ""):
+        if m.group(1) != str(iid):
+            continue
         h = m.group(2).lower()
         if h in seen:
             continue
         seen.add(h)
-        out.append(f"https://auto.am/static/offers/{m.group(1)}/{h}.{m.group(3).lower()}")
-    return out[:10]
+        out = [f"https://auto.am/static/offers/{m.group(1)}/{h}.{m.group(3).lower()}"]
+        for pre in ("m-", "s-"):
+            out.append(f"https://auto.am/static/offers/{m.group(1)}/{pre}{h}.{m.group(3).lower()}")
+        wow.append(out)
+    return wow
 
 def img_ok(r):
-    b = r.content or b""
-    if r.status_code != 200 or len(b) < 1500:
-        return False
-    return b.lstrip()[:1] != b"<"
+    return (r.status_code == 200 and r.content and len(r.content) > 1500
+            and r.headers.get("Content-Type", "").startswith("image"))
 
 def bytes_from(sess, url, ref):
     h = dict(IMG_HDRS)
     h["Referer"] = ref or BASE + "/"
-    h["Accept"] = "image/avif,image/webp,image/jpeg,image/*,*/*;q=0.8"
     try:
-        r = sess.get(url, headers=h, timeout=40)
+        r = sess.get(url, headers=h, timeout=60)
         if img_ok(r):
             return r.content
-        print(f"  фото напрямую {r.status_code}, {len(r.content or b'')} байт")
-    except Exception as e:
-        print("  фото напрямую ошибка:", type(e).__name__)
+    except Exception:
+        pass
     return None
 
 def photo_bytes(sess, url, ref):
-    """Скачиваем сами: сначала полный размер, потом мельче. Через прокси — если напрямую не вышло."""
-    for u in photo_urls(url):
-        b = bytes_from(sess, u, ref)
+    for cand in photo_urls(url):
+        h = dict(IMG_HDRS)
+        h["Referer"] = ref or BASE + "/"
+        b = bytes_from(sess, cand, ref)
         if b:
             return b
-        bare = u.split("://", 1)[-1]
+        bare = re.sub(r"^https?://", "", cand)
         for relay in (f"https://images.weserv.nl/?url={bare}",
                       f"https://wsrv.nl/?url={bare}"):
-            try:
-                r = sess.get(relay, headers=IMG_HDRS, timeout=60)
-                if img_ok(r):
-                    return r.content
-            except Exception:
-                pass
-    print("  фото не скачалось:", url)
+            b = bytes_from(sess, relay, ref)
+            if b:
+                return b
     return None
+
+# ---------- разбор объявления ----------
 
 def field(md, name):
     m = re.search(rf"^{re.escape(name)}\s+([^\n\"]+?)(?:\s*\"|$)", md, re.M)
@@ -223,10 +224,19 @@ def item_data(sess, iid):
             phone = f"{phone[:4]} {phone[4:6]} {phone[6:]}"
 
     photos = collect_photos(md, iid)
-    print(f"  {iid}: фото {len(photos)}, цена «{price}», тел {phone or '—'}")
+
+    # дилер или частник: у дилера логотип /static/dealers/,
+# у частного аккаунта — /static/account/; плюс метка «Дилер» и dealer:"y"
+    is_dealer = ("/static/dealers/" in md
+                 or re.search(r"sc-badge[^>]*>[\s\S]{0,400}?Дилер", md) is not None
+                 or re.search(r'"dealer"\s*:\s*"y"', md) is not None)
+
+    print(f"  {iid}: фото {len(photos)}, цена «{price}», тел {phone or '—'}, "
+          f"продавец {'дилер' if is_dealer else 'частный'}")
 
     return {"title": title, "price": price, "specs": specs, "where": where,
             "desc": desc, "phone": phone, "photos": photos,
+            "is_dealer": is_dealer,
             "url": f"{BASE}/ru/offer/{iid}"}
 
 def make_caption(sess, d):
@@ -251,7 +261,6 @@ def make_caption(sess, d):
 # ---------- Telegram ----------
 
 def send_url(sess, urls, caption):
-    """Запасной путь: отдаём ссылки Telegram-у, если скачать не получилось."""
     if len(urls) >= 2:
         media = [{"type": "photo", "media": urls[0], "caption": caption}]
         for p in urls[1:10]:
@@ -274,7 +283,6 @@ def send_url(sess, urls, caption):
     return r.ok
 
 def send(sess, d, caption):
-    """Скачиваем снимки сами и отправляем файлом — так качество полное."""
     blobs = []
     for u in d["photos"][:10]:
         b = photo_bytes(sess, u, d["url"])
@@ -308,7 +316,7 @@ def send(sess, d, caption):
         return bool(r.ok)
 
     print("  снимки не скачались, пробуем ссылками")
-    cand = [photo_urls(u) for u in d["photos"][:10]]
+cand = [photo_urls(u) for u in d["photos"][:10]]
     for variant in (0, 1):
         urls = [c[variant] for c in cand if len(c) > variant]
         if urls and send_url(sess, urls, caption):
@@ -327,11 +335,9 @@ def save(st):
 def main():
     st = load()
     st.setdefault("seen", {})
-    if isinstance(st["seen"], list):          # старый формат — просто список номеров
+    if isinstance(st["seen"], list):
         st["seen"] = {i: "" for i in st["seen"]}
     if st.get("seen_ver", 1) < 2:
-        # снимаем метку, которую поставила прошлая версия: дата «сегодня»
-        # у неизвестных объявлений означала «дата не менялась» и глушила обновления
         n = sum(1 for v in st["seen"].values() if v == today_iso())
         st["seen"] = {k: ("" if v == today_iso() else v)
                       for k, v in st["seen"].items()}
@@ -361,10 +367,10 @@ def main():
     fresh = []
     for iid, date in items:
         if date and date not in ok_dates:
-            continue                   # старше 7 суток — не берём вовсе
+            continue
         prev = st["seen"].get(iid, "")
         if prev and (not date or date <= prev):
-            continue                   # уже знаем и дата не обновилась
+            continue
         st["seen"][iid] = date or prev or today_iso()
         if iid in in_queue:
             continue
@@ -391,6 +397,10 @@ def main():
             ok = False
             try:
                 d = item_data(sess, iid)
+                if ONLY_PRIVATE and d.get("is_dealer"):
+                    print("  пропуск: дилер", iid)
+                    st["published"][iid] = now
+                    continue
                 cap = make_caption(sess, d)
                 ok = bool(cap) and send(sess, d, cap)
             except Exception as e:
