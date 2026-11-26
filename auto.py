@@ -1,15 +1,19 @@
-снята метка старого формата: 0
-первый запуск новой версии
-  offers-1.xml: всего 2000 объявлений
-  offers-2.xml: всего 4000 объявлений
-  offers-3.xml: всего 6000 объявлений
-  offers-4.xml: всего 8000 объявлений
-  offers-5.xml: всего 10000 объявлений
-  offers-6.xml: всего 12000 объявлений
-  offers-7.xml: всего 14000 объявлений
-  offers-8.xml: всего 16000 объявлений
-  offers-9.xml: всего 17789 объявлений
-  jina 200 / защита, попытка 1
-  jina 200 / защита, попытка 2
-  jina 200 / защита, попытка 3
-  jina 200 / защита, попытка 4
+# -*- coding: utf-8 -*-
+import os, re, json, time, requests
+
+TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID_AUTO", "")
+
+STATE      = "state_auto.json"
+INTERVAL   = 0            # публикуем на каждом запуске
+QUEUE_MAX  = 2000         # максимум объявлений в очереди
+FRESH_DAYS = 7            # берём объявления за последние 7 суток
+RESET_ONCE = True
+TEST       = False
+ONLY_PRIVATE = True       # только частные продавцы
+FORGET_SEEN  = True       # забыть просмотренные, чтобы очередь наполнилась
+
+JINA = "https://r.jina.ai/"
+BASE = "https://auto.am"
+SITEMAPS = [f"{BASE}/sitemaps/offers-{i}.xml" for i in range(1, 11)]
+HDRS = {"User-Agent": "curl/8.5.0"}
