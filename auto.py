@@ -206,7 +206,7 @@ def item_data(sess, iid):
         ("руль " + wheel.lower()) if wheel else "",
         color,
     ) if x)
-            date_str = ""
+    date_str = ""
     place = ""
     m = re.search(r"(\d{2}\.\d{2}\.\d{4})\s+([А-ЯЁ][^\n]{2,60})", md)
     if m:
