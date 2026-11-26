@@ -116,7 +116,7 @@ def get_ids(sess):
 
 def photo_urls(u):
     m = PHOTO_RE.search(u or "")
-if not m:
+    if not m:
         return [u]
     base = f"https://auto.am/static/offers/{m.group(1)}/"
     h = m.group(2).lower()
