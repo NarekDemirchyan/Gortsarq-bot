@@ -5,11 +5,11 @@ TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID_AUTO", "")
 
 STATE      = "state_auto.json"
-TEST       = True         # пауза не нужна: публикуем на каждом запуске (каждые 15 минут)
+INTERVAL   = 0           # пауза не нужна: публикуем на каждом запуске (каждые 15 минут)
 QUEUE_MAX  = 2000         # максимум объявлений в очереди
 FRESH_DAYS = 7            # берём объявления за последние 7 суток
 RESET_ONCE = True         # однократный сброс очереди, сработает один раз
-TEST       = False
+TEST       = True
 ONLY_PRIVATE = True      # True — публикуем только частных продавцов, дилеров пропускаем
 
 JINA = "https://r.jina.ai/"
