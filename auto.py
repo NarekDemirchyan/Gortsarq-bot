@@ -5,7 +5,7 @@ TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID_AUTO", "")
 
 STATE      = "state_auto.json"
-INTERVAL   = 12 * 60      # минимальный промежуток между публикациями (сек)
+INTERVAL   = 0            # публикуем на каждом запуске
 QUEUE_MAX  = 2000         # максимум объявлений в очереди
 FRESH_DAYS = 7            # берём объявления за последние 7 суток
 RESET_ONCE = True         # однократный сброс очереди, сработает один раз
