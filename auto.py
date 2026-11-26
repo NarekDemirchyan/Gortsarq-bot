@@ -5,18 +5,19 @@ TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID_AUTO", "")
 
 STATE      = "state_auto.json"
-INTERVAL   = 0
-QUEUE_MAX  = 2000
-FRESH_DAYS = 7
-RESET_ONCE = True
+INTERVAL   = 0           # пауза не нужна: публикуем на каждом запуске (каждые 15 минут)
+QUEUE_MAX  = 2000         # максимум объявлений в очереди
+FRESH_DAYS = 7            # берём объявления за последние 7 суток
+RESET_ONCE = True         # однократный сброс очереди, сработает один раз
 TEST       = False
-ONLY_PRIVATE = True
-FORGET_SEEN  = True
+ONLY_PRIVATE = True      # True — публикуем только частных продавцов, дилеров пропускаем
 
 JINA = "https://r.jina.ai/"
 BASE = "https://auto.am"
 SITEMAPS = [f"{BASE}/sitemaps/offers-{i}.xml" for i in range(1, 11)]
 HDRS = {"User-Agent": "curl/8.5.0"}
+
+# для картинок — обычный браузерный заголовок, иначе сайт отдаёт заглушку
 IMG_HDRS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
@@ -26,15 +27,15 @@ IMG_HDRS = {
 DATE_RE = re.compile(r"<lastmod>(\d{4}-\d{2}-\d{2})")
 BLOCKED = ("just a moment", "attention required", "enable javascript",
            "checking your browser", "cloudflare")
+
+# один снимок в трёх размерах: полный (без приставки), m- и s-
 PHOTO_RE = re.compile(
     r"https://auto\.am/static/offers/(\d+)/(?:[ms]-)?([0-9a-f]{8,})\.(webp|jpg|jpeg|png)",
     re.I)
 
-
 def is_blocked(text):
     t = (text or "").strip()
     return len(t) < 800 or any(m in t.lower() for m in BLOCKED)
-
 
 def jina(sess, url, extra=None):
     h = dict(HDRS)
@@ -51,7 +52,6 @@ def jina(sess, url, extra=None):
         time.sleep(10 * (attempt + 1))
     return ""
 
-
 def fetch_sitemap(sess, url):
     try:
         r = sess.get(url, headers=HDRS, timeout=60)
@@ -61,18 +61,16 @@ def fetch_sitemap(sess, url):
         print("  sitemap ошибка:", type(e).__name__)
     return jina(sess, url)
 
-
 def today_iso():
     return time.strftime("%Y-%m-%d", time.gmtime(time.time() + 4 * 3600))
 
-
 def last_days(n):
+    # даты сайта (ГГГГ-ММ-ДД) за последние n суток по Еревану (UTC+4)
     out = set()
     base = time.time() + 4 * 3600
     for k in range(n + 1):
         out.add(time.strftime("%Y-%m-%d", time.gmtime(base - k * 24 * 3600)))
     return out
-
 
 def translate(sess, text):
     text = (text or "").strip()
@@ -89,12 +87,11 @@ def translate(sess, text):
         print("  перевод недоступен:", type(e).__name__)
     return text
 
-
 def has_cyr(s):
     return bool(re.search(r"[А-Яа-яЁё]", s or ""))
 
-
 def get_ids(sess):
+    """Список (id, дата последнего изменения) из sitemap."""
     items = []
     seen = set()
     for sm in SITEMAPS:
@@ -113,8 +110,10 @@ def get_ids(sess):
         time.sleep(5)
     return items
 
+# ---------- фотографии ----------
 
 def photo_urls(u):
+    """Варианты одного снимка: сначала полный, потом m-, потом s-."""
     m = PHOTO_RE.search(u or "")
     if not m:
         return [u]
@@ -122,7 +121,6 @@ def photo_urls(u):
     h = m.group(2).lower()
     ext = m.group(3).lower()
     return [f"{base}{h}.{ext}", f"{base}m-{h}.{ext}", f"{base}s-{h}.{ext}"]
-
 
 def collect_photos(md, iid):
     out, seen = [], set()
@@ -134,13 +132,11 @@ def collect_photos(md, iid):
         out.append(f"https://auto.am/static/offers/{m.group(1)}/{h}.{m.group(3).lower()}")
     return out[:10]
 
-
 def img_ok(r):
     b = r.content or b""
     if r.status_code != 200 or len(b) < 1500:
         return False
     return b.lstrip()[:1] != b"<"
-
 
 def bytes_from(sess, url, ref):
     h = dict(IMG_HDRS)
@@ -150,12 +146,13 @@ def bytes_from(sess, url, ref):
         r = sess.get(url, headers=h, timeout=40)
         if img_ok(r):
             return r.content
-    except Exception:
-        pass
+        print(f"  фото напрямую {r.status_code}, {len(r.content or b'')} байт")
+    except Exception as e:
+        print("  фото напрямую ошибка:", type(e).__name__)
     return None
 
-
 def photo_bytes(sess, url, ref):
+    """Скачиваем сами: сначала полный размер, потом мельче. Через прокси — если напрямую не вышло."""
     for u in photo_urls(url):
         b = bytes_from(sess, u, ref)
         if b:
@@ -169,13 +166,12 @@ def photo_bytes(sess, url, ref):
                     return r.content
             except Exception:
                 pass
+    print("  фото не скачалось:", url)
     return None
-
 
 def field(md, name):
     m = re.search(rf"^{re.escape(name)}\s+([^\n\"]+?)(?:\s*\"|$)", md, re.M)
     return m.group(1).strip() if m else ""
-
 
 def item_data(sess, iid):
     md = jina(sess, f"{BASE}/ru/offer/{iid}")
@@ -194,19 +190,32 @@ def item_data(sess, iid):
         f"{usd.group(1).strip()} $" if usd else "",
         f"{amd.group(1).strip()} ֏" if amd else ""] if x)
 
+    gear   = field(md, "Коробка передач")
+    fuel   = field(md, "Двигатель")
+    body   = field(md, "Тип кузова")
+    color  = field(md, "Цвет")
+    wheel  = field(md, "Руль")
+    state  = field(md, "Состояние")
+    mileage= field(md, "Пробег")
+    modif  = field(md, "Модификация")
+    salon  = field(md, "Салон") or field(md, "Декор")
+
     specs = " · ".join(x for x in (
-        ("Пробег " + field(md, "Пробег")) if field(md, "Пробег") else "",
-        field(md, "Тип кузова"),
-        field(md, "Двигатель"),
-        field(md, "Коробка передач"),
-        ("руль " + field(md, "Руль").lower()) if field(md, "Руль") else "",
-        field(md, "Цвет"),
+        ("Пробег " + mileage) if mileage else "",
+        body, fuel, gear,
+        ("руль " + wheel.lower()) if wheel else "",
+        color,
     ) if x)
 
-    where = ""
+    date_str = ""
+    place = ""
     m = re.search(r"(\d{2}\.\d{2}\.\d{4})\s+([А-ЯЁ][^\n]{2,60})", md)
     if m:
-        where = f"{m.group(1)} · {m.group(2).strip()}"
+        date_str = m.group(1)
+        place = m.group(2).strip()
+    where = " · ".join(x for x in [place] if x)
+
+    options = field(md, "Опции") or field(md, "Օպցիաներ")
 
     desc = ""
     m = re.search(r"Дополнительно\s*\n+(.+?)(?:\n\s*(?:Продавец|Похожие)\b|\Z)",
@@ -228,6 +237,9 @@ def item_data(sess, iid):
             phone = f"{phone[:4]} {phone[4:6]} {phone[6:]}"
 
     photos = collect_photos(md, iid)
+
+    # дилер или частник: у дилера логотип лежит в /static/dealers/,
+    # у частного аккаунта — в /static/account/; плюс метка «Дилер» и dealer:"y"
     is_dealer = ("/static/dealers/" in md
                  or re.search(r"sc-badge[^>]*>[\s\S]{0,400}?Дилер", md) is not None
                  or re.search(r'"dealer"\s*:\s*"y"', md) is not None)
@@ -238,30 +250,101 @@ def item_data(sess, iid):
     return {"title": title, "price": price, "specs": specs, "where": where,
             "desc": desc, "phone": phone, "photos": photos,
             "is_dealer": is_dealer,
-"url": f"{BASE}/ru/offer/{iid}"}
+            "mileage": mileage, "body": body, "fuel": fuel, "gear": gear,
+            "wheel": wheel, "color": color, "state": state,
+            "modif": modif, "salon": salon,
+            "date_str": date_str, "place": place, "options": options,
+            "url": f"{BASE}/ru/offer/{iid}"}
+
+def hashtags(d):
+    """2-3 хештега по марке, кузову и городу."""
+    out = []
+    title = d.get("title") or ""
+    words = [w for w in re.split(r"\s+", title) if w and w[0].isalnum()]
+    if words:
+        brand_words = [words[0]]
+        # «Land Rover», «Mercedes Benz» — берём два слова, если второе тоже с большой буквы
+        if len(words) > 1 and words[1][:1].isupper() and words[1][0].isalpha():
+            brand_words.append(words[1])
+        brand = "".join(re.sub(r"[^0-9A-Za-zА-Яа-яЁё]", "", w) for w in brand_words)
+        if len(brand) > 1:
+            out.append("#" + brand)
+    body = (d.get("body") or "").strip()
+    body_map = {
+        "Внедорожник": "#внедорожник", "Седан": "#седан", "Хетчбэк": "#хетчбэк",
+        "Универсал": "#универсал", "Купе": "#купе", "Кабриолет": "#кабриолет",
+        "Пикап": "#пикап", "Фургон": "#фургон", "Минивэн": "#минивэн",
+    }
+    if body in body_map:
+        out.append(body_map[body])
+    where = d.get("place") or d.get("where") or ""
+    for city, tag in (("Ереван", "#ереван"), ("Երևան", "#երեւան"),
+                      ("Гюмри", "#гюмри"), ("Ванадзор", "#ванадзор"),
+                      ("Абовян", "#абовян"), ("Котайк", "#котайк")):
+        if city in where:
+            out.append(tag)
+            break
+    if len(out) < 2:
+        out.append("#автомобиль")
+    return " ".join(out[:3])
 
 
 def make_caption(sess, d):
     lines = []
     if d["title"]:
-        lines.append(d["title"])
+        lines.append("🚗 " + d["title"])
     if d["price"]:
-        lines.append(d["price"])
-    if d["specs"]:
-        lines.append(d["specs"])
-    if d["where"]:
-        lines.append(d["where"])
+        lines.append("💰 " + d["price"])
+
+    spec = []
+    if d.get("mileage"):
+        spec.append("• Пробег: " + d["mileage"])
+    if d.get("body"):
+        spec.append("• Кузов: " + d["body"])
+    if d.get("fuel"):
+        spec.append("• Двигатель: " + d["fuel"])
+    if d.get("gear"):
+        spec.append("• Коробка: " + d["gear"])
+    if d.get("wheel"):
+        spec.append("• Руль: " + d["wheel"])
+    if d.get("color"):
+        spec.append("• Цвет: " + d["color"])
+    if d.get("state"):
+        spec.append("• Состояние: " + d["state"])
+    if d.get("modif"):
+        spec.append("• Модификация: " + d["modif"])
+    if d.get("salon"):
+        spec.append("• Салон: " + d["salon"])
+    if spec:
+        lines.append("📊 Характеристики\n" + "\n".join(spec))
+
+    if d.get("options"):
+        lines.append("⚙️ Опции\n" + d["options"][:400])
+
+    loc = d.get("place") or d.get("where")
+    if loc:
+        lines.append("📍 " + loc)
+    if d.get("date_str"):
+        lines.append("🗓 Размещено: " + d["date_str"])
+
     desc = d["desc"]
     if desc and not has_cyr(desc):
         desc = translate(sess, desc)
     if desc:
-        lines.append(desc)
+        lines.append("📝 Дополнительно\n" + desc[:550])
+
     if d["phone"]:
-        lines.append("Телефон: " + d["phone"])
+        lines.append("📞 " + d["phone"])
+
+    tags = hashtags(d)
+    if tags:
+        lines.append(tags)
+
     return "\n\n".join(x for x in lines if x).strip()[:1024]
 
 
 def send_url(sess, urls, caption):
+    """Запасной путь: отдаём ссылки Telegram-у, если скачать не получилось."""
     if len(urls) >= 2:
         media = [{"type": "photo", "media": urls[0], "caption": caption}]
         for p in urls[1:10]:
@@ -283,8 +366,8 @@ def send_url(sess, urls, caption):
     print("telegram (ссылки):", r.status_code, r.text[:200])
     return r.ok
 
-
 def send(sess, d, caption):
+    """Скачиваем снимки сами и отправляем файлом — так качество полное."""
     blobs = []
     for u in d["photos"][:10]:
         b = photo_bytes(sess, u, d["url"])
@@ -304,6 +387,7 @@ def send(sess, d, caption):
             print("telegram album:", r.status_code, r.text[:200])
             if r.ok:
                 return True
+            print("  альбом не прошёл, пробуем одним снимком")
         r = sess.post(f"https://api.telegram.org/bot{TOKEN}/sendPhoto",
                       data={"chat_id": CHAT_ID, "caption": caption},
                       files={"photo": ("p.jpg", blobs[0])}, timeout=120)
@@ -316,6 +400,7 @@ def send(sess, d, caption):
         print("telegram файлом:", r.status_code, r.text[:200])
         return bool(r.ok)
 
+    print("  снимки не скачались, пробуем ссылками")
     cand = [photo_urls(u) for u in d["photos"][:10]]
     for variant in (0, 1):
         urls = [c[variant] for c in cand if len(c) > variant]
@@ -323,45 +408,56 @@ def send(sess, d, caption):
             return True
     return send_url(sess, [], caption)
 
-
 def load():
     if os.path.exists(STATE):
         return json.load(open(STATE, encoding="utf-8"))
     return {"seen": {}, "queue": [], "last_publish": 0,
             "published": {}, "failed": {}}
 
-
 def save(st):
     json.dump(st, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
-
 
 def main():
     st = load()
     st.setdefault("seen", {})
-    if FORGET_SEEN:
-        n = len(st["seen"])
-        st["seen"] = {}
-        print("память о просмотренных очищена:", n)
-    if isinstance(st["seen"], list):
+    if isinstance(st["seen"], list):          # старый формат — просто список номеров
         st["seen"] = {i: "" for i in st["seen"]}
+    if st.get("seen_ver", 1) < 2:
+        # снимаем метку, которую поставила прошлая версия: дата «сегодня»
+        # у неизвестных объявлений означала «дата не менялась» и глушила обновления
+        n = sum(1 for v in st["seen"].values() if v == today_iso())
+        st["seen"] = {k: ("" if v == today_iso() else v)
+                      for k, v in st["seen"].items()}
+        st["seen_ver"] = 2
+        print("снята метка старого формата:", n)
     st.setdefault("queue", [])
     st.setdefault("failed", {})
     st.setdefault("published", {})
     st.setdefault("last_publish", 0)
     sess = requests.Session()
 
+    if RESET_ONCE and not st.get("reset_done"):
+        st["reset_done"] = True
+        print("первый запуск новой версии")
+
     items = get_ids(sess)
     print("всего объявлений в sitemap:", len(items))
+
+    if TEST:
+        if items:
+            d = item_data(sess, items[0][0])
+            send(sess, d, make_caption(sess, d))
+        return
 
     ok_dates = last_days(FRESH_DAYS)
     in_queue = set(st["queue"])
     fresh = []
     for iid, date in items:
         if date and date not in ok_dates:
-            continue
+            continue                   # старше 7 суток — не берём вовсе
         prev = st["seen"].get(iid, "")
         if prev and (not date or date <= prev):
-            continue
+            continue                   # уже знаем и дата не обновилась
         st["seen"][iid] = date or prev or today_iso()
         if iid in in_queue:
             continue
@@ -390,7 +486,7 @@ def main():
                 d = item_data(sess, iid)
                 if ONLY_PRIVATE and d.get("is_dealer"):
                     print("  пропуск: дилер", iid)
-                    st["published"][iid] = now
+                    st["published"][iid] = now      # чтобы не возвращался в очередь
                     continue
                 cap = make_caption(sess, d)
                 ok = bool(cap) and send(sess, d, cap)
@@ -404,6 +500,7 @@ def main():
             st["failed"][iid] = st["failed"].get(iid, 0) + 1
             if st["failed"][iid] < 2:
                 st["queue"].append(iid)
+                print("  вернём в конец очереди:", iid)
             else:
                 print("  брошен", iid)
 
@@ -412,6 +509,5 @@ def main():
         st["published"] = {k: st["published"][k] for k in keys}
 
     save(st)
-
 
 main()
