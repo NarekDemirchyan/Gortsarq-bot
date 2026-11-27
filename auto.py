@@ -109,7 +109,7 @@ def get_ids(sess):
         print(f"  {sm.rsplit('/', 1)[-1]}: всего {len(items)} объявлений")
         time.sleep(5)
     return items
-            
+
 # ---------- фотографии ----------
 
 def photo_urls(u):
@@ -206,6 +206,7 @@ def item_data(sess, iid):
         ("руль " + wheel.lower()) if wheel else "",
         color,
     ) if x)
+
     date_str = ""
     place = ""
     m = re.search(r"(\d{2}\.\d{2}\.\d{4})\s+([А-ЯЁ][^\n]{2,60})", md)
@@ -319,7 +320,7 @@ def make_caption(sess, d):
 
     if d.get("options"):
         lines.append("⚙️ Опции\n" + d["options"][:400])
-                
+
     loc = d.get("place") or d.get("where")
     if loc:
         lines.append("📍 " + loc)
@@ -415,6 +416,7 @@ def load():
 
 def save(st):
     json.dump(st, open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
+
 def main():
     st = load()
     st.setdefault("seen", {})
