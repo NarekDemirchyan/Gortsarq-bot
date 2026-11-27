@@ -8,7 +8,7 @@ STATE      = "state_auto.json"
 INTERVAL   = 0           # пауза не нужна: публикуем на каждом запуске (каждые 15 минут)
 QUEUE_MAX  = 2000         # максимум объявлений в очереди
 FRESH_DAYS = 7            # берём объявления за последние 7 суток
-RESET_ONCE = False        # однократный сброс очереди, сработает один раз
+RESET_ONCE = True         # однократный сброс очереди, сработает один раз
 TEST       = False
 ONLY_PRIVATE = True      # True — публикуем только частных продавцов, дилеров пропускаем
 
@@ -175,6 +175,10 @@ def field(md, name):
 
 def item_data(sess, iid):
     md = jina(sess, f"{BASE}/ru/offer/{iid}")
+    # сайт иногда отдаёт пустую страницу — пробуем ещё раз
+    if not md or len(md.strip()) < 1500 or "Title:" not in md:
+        time.sleep(3)
+        md = jina(sess, f"{BASE}/ru/offer/{iid}")
     cut = md.find("Подчеркнутое объявление")
     if cut > 0:
         md = md[:cut]
@@ -487,6 +491,13 @@ def main():
                 if ONLY_PRIVATE and d.get("is_dealer"):
                     print("  пропуск: дилер", iid)
                     st["published"][iid] = now      # чтобы не возвращался в очередь
+                    continue
+                # пустые данные (сайт отдал заглушку) — не публикуем, вернём в очередь
+                if not d.get("title") and not d.get("price"):
+                    print("  пустые данные, вернём в очередь:", iid)
+                    st["failed"][iid] = st["failed"].get(iid, 0) + 1
+                    if st["failed"][iid] < 3:
+                        st["queue"].append(iid)
                     continue
                 cap = make_caption(sess, d)
                 ok = bool(cap) and send(sess, d, cap)
