@@ -8,7 +8,7 @@ STATE      = "state_auto.json"
 INTERVAL   = 0           # пауза не нужна: публикуем на каждом запуске (каждые 15 минут)
 QUEUE_MAX  = 2000         # максимум объявлений в очереди
 FRESH_DAYS = 7            # берём объявления за последние 7 суток
-RESET_ONCE = False        # однократный сброс очереди, сработает один раз
+RESET_ONCE = True         # однократный сброс очереди, сработает один раз
 TEST       = False
 ONLY_PRIVATE = True      # True — публикуем только частных продавцов, дилеров пропускаем
 
@@ -481,9 +481,11 @@ def main():
     print("очередь:", len(st["queue"]))
 
     if st["queue"] and now - st["last_publish"] >= INTERVAL:
-        for _ in range(3):
-            if not st["queue"]:
-                break
+        # публикуем ОБЯЗАТЕЛЬНО одну карточку за запуск: идём по очереди,
+        # пока не найдём подходящее объявление
+        tries = 0
+        while st["queue"] and tries < 120:
+            tries += 1
             iid = st["queue"].pop(0)
             ok = False
             try:
