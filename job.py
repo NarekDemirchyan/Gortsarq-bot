@@ -63,7 +63,7 @@ SITE_RE = re.compile(r"<loc>\s*(https?://job\.am/hy/job/[^<\s]+?)\s*</loc>"
                      r"\s*<lastmod>\s*(\d{4}-\d{2}-\d{2})", re.I)
 DATE_ANY = re.compile(r"(\d{1,2})[./\-](\d{1,2})[./\-](\d{4})")
 DAYNUM_RE = re.compile(r"^\d{1,2}[\.\-/]")
-PHONE_RE = re.compile(r"(?:\+?374|\b0)[\s\-\(\)0-9]{7,18}")
+PHONE_RE = re.compile(r"(?<!\d)(?:\+?374|0)(?:[ \t\-\(\)]*\d){8}(?!\d)")
 TEL_RE = re.compile(r"""href=["']\s*tel:([^"']{6,40})["']""", re.I)
 JF_LINK = re.compile(r"/jobs/[a-z0-9\-]+/(\d+)", re.I)
 
@@ -242,21 +242,24 @@ def title_of(html_text, tags=("h1",)):
         return clean(text_of(m.group(1)).split("|")[0])
     return ""
 
+def norm_phone(raw):
+    """Վերադարձնում է միայն ճիշտ հայկական համար (+374 XX XXX XXX), այլապես դատարկ տող"""
+    digits = re.sub(r"\D", "", raw)
+    if digits.startswith("374") and len(digits) == 11:
+        d = digits[3:]
+    elif digits.startswith("0") and len(digits) == 9:
+        d = digits[1:]
+    else:
+        return ""
+    return "+374 %s %s %s" % (d[:2], d[2:5], d[5:])
+
 def phones_of(html_text, t):
     raw = [unquote(m.group(1)) for m in TEL_RE.finditer(html_text)]
     raw += [m.group(0) for m in PHONE_RE.finditer(t)]
     res = []
     for p in raw:
-        digits = re.sub(r"\D", "", p)
-        if len(digits) < 9 or len(digits) > 15:
-            continue
-        if digits.startswith("374") and len(digits) == 11:
-            p = "+374 %s %s %s" % (digits[3:5], digits[5:8], digits[8:])
-        elif digits.startswith("0") and len(digits) == 9:
-            p = "+374 %s %s %s" % (digits[1:3], digits[3:6], digits[6:])
-        else:
-            p = "+" + digits
-        if p not in res:
+        p = norm_phone(p)
+        if p and p not in res:
             res.append(p)
     return res[:2]
 
