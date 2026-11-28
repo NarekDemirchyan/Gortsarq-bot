@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-job.am + jobfinder.am -> Telegram «Աշխատանք Հայաստանում | Գործ կա»
+ԱԼԻՔ   ՝ jobs  («Աշխատանք Հայաստանում | Գործ կա»)
+ԿԱՅՔԵՐ ՝ job.am + jobfinder.am
+ՖԱՅԼ   ՝ job.py | state՝ state-job.json | secrets՝ TELEGRAM_TOKEN, JOB_CHANNEL
 
 Հերթի կանոնները՝
   * հերթում առավելագույնը QUEUE_MAX (400) հայտարարություն
@@ -33,7 +35,10 @@ MAX_FAILS       = 3     # մեկ գործարկման ընթացքում առա�
 JF_PAGES        = 12
 
 # ԶՐՈՅԱՑՈՒՄ՝ այս թիվը փոխելիս state-ը (հերթը, բոլոր ID-ները) ամբողջությամբ մաքրվում է
-STATE_VER = 19
+STATE_VER = 20
+# True՝ զրոյացման ժամանակ արդեն հրապարակվածների ID-ները և մատնահետքերը պահվում են,
+# որ նույն հայտարարությունները նորից չհրապարակվեն
+KEEP_PUBLISHED_ON_RESET = True
 
 SEEN_DAYS = 35          # մերժված/հեռացված ID-ները չեն ստուգվում այսքան օր (> 30 օրվա sitemap)
 KEEP_DAYS = 60          # հրապարակվածների ID-ները և մատնահետքերը պահվում են այսքան օր
@@ -96,7 +101,35 @@ JF_HEADS = {"Աշխատանքի նկարագրությունը": "Նկարագր
             "Պահանջները": "Պահանջներ",
             "Պահանջներ": "Պահանջներ",
             "Վարձատրություն և պայմաններ": "Հավելյալ նշումներ",
-            "Լրացուցիչ տեղեկություններ": "Հավելյալ նշումներ"}
+            "Լրացուցիչ տեղեկություններ": "Հավելյալ նշումներ",
+            "Հավելյալ նշումներ": "Հավելյալ նշումներ",
+            "Հավելյալ տեղեկություններ": "Հավելյալ նշումներ",
+            "Աշխատանքային պայմաններ": "Հավելյալ նշումներ",
+            "Մենք առաջարկում ենք": "Առավելություններ",
+            "Առաջարկում ենք": "Առավելություններ",
+            "Նպաստներ": "Առավելություններ",
+            "Պահանջվող հմտություններ": "Պահանջներ",
+            "Հիմնական պարտականություններ": "Պարտականություններ",
+            "Հիմնական պահանջներ": "Պահանջներ"}
+# Վերնագրի նման կարճ տողերի ճանաչում (եթե ճշգրիտ անունը ցանկում չկա)
+JF_STEMS = (("պարտականություն", "Պարտականություններ"),
+            ("գործառույթ", "Պարտականություններ"),
+            ("որակավորում", "Պահանջներ"),
+            ("պահանջ", "Պահանջներ"),
+            ("առավելություն", "Առավելություններ"),
+            ("առաջարկ", "Առավելություններ"),
+            ("նշումներ", "Հավելյալ նշումներ"),
+            ("նկարագր", "Նկարագրություն"))
+# Կայքի մենյուի տողեր, որոնք երբեք հայտարարության մաս չեն
+NAV_LINES = ("մուտք", "գրանցվել", "մուտք / գրանցվել", "հայ", "eng", "en", "ru", "рус",
+             "աշխատանքներ", "գործընկերներ", "գնացուցակ", "մեր մասին", "կապ",
+             "գլխավոր", "ռեզյումեներ", "գործատուներ")
+# jobfinder-ի վերևի տվյալների պիտակները
+JF_LABELS = sorted(("Աշխատանքի տեսակը", "Աշխատանքային գրաֆիկ", "Աշխատանքային փորձ",
+                    "Նախընտրելի տարիք", "Հեռ. համար", "Վերջնաժամկետը", "Վերջնաժամկետ",
+                    "Աշխատավայր", "Աշխատավարձ", "Կրթություն", "Գրաֆիկ", "Վայրը",
+                    "Ոլորտ", "Փորձ", "Սեռ", "Հեռ", "Դրույք"), key=len, reverse=True)
+LABEL_SPLIT = re.compile("(" + "|".join(re.escape(x) for x in JF_LABELS) + r")(?=\s*[`\u055d:\u0589])")
 STOP_LINES = ("Ամբողջությամբ կարդալ", "Տեսնել ավելին", "Դիմել", "Կարդալ ավելին")
 STOP_WORDS = ("Ընկերության մասին", "Տարածեք հայտարարությունը",
               "Ներբեռնեք", "ներբեռնեք", "անվճար հավելված",
@@ -495,17 +528,97 @@ def parse_am(html_text, path):
 
 # ---------------------------------------------------------------- jobfinder
 
+def jf_head(line):
+    """Եթե տողը բաժնի վերնագիր է՝ վերադարձնում է (բաժնի անուն, նույն տողի մնացած տեքստ), այլապես (None, "")"""
+    head = JF_HEADS.get(line)
+    if head:
+        return head, ""
+    for k, v in JF_HEADS.items():
+        if line.startswith(k) and len(line) - len(k) < 60:
+            if len(line) == len(k) or not line[len(k)].isalpha():
+                rest = clean(line[len(k):].lstrip(" `\u055d:\u0589-–"))
+                return v, rest
+    low = line.lower()
+    words = line.split()
+    if (1 <= len(words) <= 3 and len(line) <= 40 and line[0].isupper()
+            and not re.search(r"[.\u0589:;,!?()\d]", line)
+            and not low.startswith("պահանջվում")):
+        for stem, v in JF_STEMS:
+            if stem in low:
+                return v, ""
+    return None, ""
+
+def jf_header(t, title):
+    """Վերնագրից հետո մինչև առաջին բաժինը եղած տողերը (Վայրը, Աշխատավարձ, Ոլորտ ...)"""
+    lines = [clean(x) for x in t.split("\n")]
+    lines = [x for x in lines if x]
+    tc = clean(title).lower()
+    start = -1
+    for i, x in enumerate(lines):
+        c = re.sub(r"\s+", " ", x.lower()).strip(" «»\"'")
+        if tc and (c == tc or (len(c) > 6 and c.startswith(tc))):
+            start = i + 1
+            break
+    if start < 0:
+        return []
+    out = []
+    for x in lines[start:start + 40]:
+        if jf_head(x)[0]:
+            break
+        for part in LABEL_SPLIT.sub(lambda m: "\n" + m.group(1), x).split("\n"):
+            part = clean(part)
+            if part:
+                out.append(part)
+    return out
+
+def jf_lab(lines, names):
+    """Փնտրում է պիտակը (Վայրը, Ոլորտ ...)։ Արժեքը կարող է լինել նույն տողում (` ՝ : նշաններից հետո)
+    կամ հաջորդ տողում"""
+    for name in names:
+        for i, line in enumerate(lines):
+            if not line.startswith(name):
+                continue
+            rest = line[len(name):]
+            if rest and rest[0].isalpha():
+                continue
+            rest = clean(rest.lstrip(" \t`\u055d:\u0589-–"))
+            if rest:
+                val = rest
+            else:
+                nxt = lines[i + 1] if i + 1 < len(lines) else ""
+                if (not nxt or nxt.startswith(STOP_LINES)
+                        or any(nxt.startswith(x) for x in JF_LABELS)):
+                    continue
+                val = clean(nxt)
+            if val and not junk(val):
+                return val
+    return ""
+
 def jf_sections(t, title="", company=""):
     lines = [clean(x) for x in t.split("\n")]
     lines = [x for x in lines if x]
 
-    meta = [clean(title).lower(), clean(company).lower()]
+    t_core = clean(title).lower()
+    meta = [t_core, clean(company).lower()]
+
+    def is_title(x):
+        c = re.sub(r"\s+", " ", x.lower()).strip(" «»\"'")
+        return bool(t_core) and (c == t_core or (len(c) > 6 and c.startswith(t_core)))
+
+    # Վերնագրից առաջ եղած ամեն ինչ (մենյու, մուտք, լեզու) բաց է թողնվում
+    after = not any(is_title(x) for x in lines)
     sections, cur, started, intro = [], None, False, []
 
     for line in lines:
         low = line.lower()
         core = re.sub(r"\s+", " ", low).strip(" «»\"'")
+        if not after:
+            if is_title(line):
+                after = True
+            continue
         if "jobfinder" in low:
+            continue
+        if core in NAV_LINES:
             continue
         if core in meta:
             continue
@@ -521,25 +634,18 @@ def jf_sections(t, title="", company=""):
         if "ստեղծել" in low or "ռեզյումե" in low or "տեղադրել հայտարարություն" in low:
             continue
 
-        head = JF_HEADS.get(line)
-        rest0 = ""
-        if head is None:
-            for k, v in JF_HEADS.items():
-                if line.startswith(k) and len(line) - len(k) < 60:
-                    head = v
-                    rest0 = clean(line[len(k):])
-                    break
+        head, rest0 = jf_head(line)
 
         if head:
             if not started and intro:
                 first = [x for x in intro if ARM.search(x) and not boiler(x)]
                 if first:
-                    sections.append(("Նկարագրություն", first[:5]))
+                    sections.append(["Նկարագրություն", first[:5]])
             started = True
             cur = [head, []]
             sections.append(cur)
             if rest0:
-                add_item(cur, rest0.lstrip("`:\u0589 "))
+                add_item(cur, rest0)
             continue
 
         if started and (line.startswith("Դիմել") or line.startswith("Ընկերության մասին")):
@@ -550,11 +656,14 @@ def jf_sections(t, title="", company=""):
         if not started:
             if any(line.startswith(x) for x in JF_META):
                 continue
+            if any(line.startswith(x) for x in JF_LABELS) or LABEL_SPLIT.search(line):
+                continue
             if re.search(r"\d{2}[./]\d{2}[./]\d{4}", line):
                 continue
             if any(low.startswith(b) for b in INTRO_BAD):
                 continue
-            if len(intro) < 14 and line not in intro:
+            # նախաբանում վերցվում են միայն իսկական նախադասությունները (ոչ կարճ մենյուի բառերը)
+            if len(line) >= 30 and len(intro) < 14 and line not in intro:
                 intro.append(line)
             continue
 
@@ -565,11 +674,25 @@ def jf_sections(t, title="", company=""):
             continue
         add_item(cur, it)
 
+    if not started and intro:
+        first = [x for x in intro if ARM.search(x) and not boiler(x)]
+        if first:
+            sections.append(["Նկարագրություն", first[:5]])
+
+    # Նույն անունով բաժինները միացվում են (չի լինում երկու «Նկարագրություն»)
+    merged = []
+    for head, items in sections:
+        same = next((m for m in merged if m[0] == head), None)
+        if same is None:
+            merged.append([head, list(items)])
+        else:
+            same[1].extend(items)
+
     limits = {"Նկարագրություն": 6, "Առավելություններ": 10,
               "Պարտականություններ": 12, "Պահանջներ": 12,
               "Հավելյալ նշումներ": 8}
     out = []
-    for head, items in sections:
+    for head, items in merged:
         uniq = []
         for it in items:
             if it not in uniq and not boiler(it):
@@ -590,23 +713,23 @@ def parse_jf(html_text, pid):
             company = cand
             break
 
-    def lab(name):
-        m = re.search(re.escape(name) + r"\s*`?\s*:\s*([^\n]{0,200})", t)
-        val = clean(m.group(1)) if m else ""
-        return "" if junk(val) else val
+    hdr = jf_header(t, title)
+
+    def lab(*names):
+        return jf_lab(hdr, names)
 
     ind = lab("Ոլորտ")
-    place = lab("Վայրը").replace(",", ", ").replace("Հայաստան, ", "")
+    place = re.sub(r"\s*,\s*", ", ", lab("Վայրը", "Աշխատավայր")).replace("Հայաստան, ", "")
 
     return {
         "id": str(pid),
         "title": title[:90],
         "company": company[:70],
         "place": place[:70],
-        "salary": money(lab("Աշխատավարձ"))[:60],
-        "type": lab("Աշխատանքի տեսակը")[:50],
-        "sched": lab("Գրաֆիկ")[:70],
-        "exp": lab("Փորձ")[:50],
+        "salary": money(re.sub(r"^Ամսական\s*", "", lab("Աշխատավարձ")))[:60],
+        "type": lab("Աշխատանքի տեսակը", "Դրույք")[:50],
+        "sched": lab("Աշխատանքային գրաֆիկ", "Գրաֆիկ")[:70],
+        "exp": lab("Աշխատանքային փորձ", "Փորձ")[:50],
         "ind": ind[:90],
         "deadline": deadline_of(t),
         "phones": phones_of(html_text, t),
@@ -628,9 +751,17 @@ def load():
         st = json.load(open(STATE, encoding="utf-8"))
     except Exception:
         st = None
-    if not isinstance(st, dict) or st.get("ver") != STATE_VER:
-        print("state-ը զրոյացվեց (նոր տարբերակ՝", STATE_VER, ")")
+    if not isinstance(st, dict):
+        print("state-ը չկա, սկսում եմ զրոյից")
         return fresh_state()
+    if st.get("ver") != STATE_VER:
+        new = fresh_state()
+        if KEEP_PUBLISHED_ON_RESET:
+            new["published"] = st.get("published", {})
+            new["fps"] = st.get("fps", {})
+            new["last_site"] = st.get("last_site", "")
+        print("state-ը զրոյացվեց (նոր տարբերակ՝", STATE_VER, "), հերթը մաքրվեց")
+        return new
     for k, v in fresh_state().items():
         st.setdefault(k, v)
     return st
